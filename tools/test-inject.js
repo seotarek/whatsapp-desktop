@@ -1,0 +1,1170 @@
+/*
+ * Replays the chat list past src/page/inject.js, without WhatsApp and without a
+ * browser.
+ *
+ * Every notification bug this client has had lived in the page-side watcher, and
+ * every one of them was found by hand on a live session -- which means waiting
+ * for somebody to write to you, and being unable to reproduce what you just saw.
+ * The watcher only ever touches the DOM through a handful of selectors, so a few
+ * hundred lines of mock element are enough to drive it: build a chat list, move
+ * a row the way WhatsApp moves one, and ask the page what arrived.
+ *
+ * Run it with `make test`. No dependencies, no browser, no account.
+ */
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+const vm   = require('vm');
+/* The marks, read from the one table that defines them rather than written out
+   again here. Spelling a glyph into a test is how a check comes to be asserting
+   the character somebody typed in 2026 instead of the character the client uses
+   -- which is exactly what happened when every mark was moved to its monochrome
+   form and two checks failed for having the old one in them. */
+const { MARKS } = require('../src/wording.js');
+
+const SRC = process.env.WA_INJECT || path.join(__dirname, '..', 'src', 'page', 'inject.js');
+const US  = String.fromCharCode(31);      // the unit separator the page answers with
+/* How long the page gives an invite dialog to appear before asking again. Read
+   out of the page rather than written down twice, so a change there moves the
+   waits here with it. */
+const INVITE_SETTLE_MS = Number(
+  /INVITE_SETTLE_MS\s*=\s*(\d+)/.exec(fs.readFileSync(SRC, 'utf8'))[1]);
+
+/* ------------------------------------------------------------ the mock DOM */
+
+/* Only the selector forms inject.js actually uses: a tag, an #id, [attr],
+   [attr="value"], [attr^="value"], and comma-separated lists of those. */
+const parseSel = sel => sel.split(',').map(part => {
+  const whole = /^([a-zA-Z]*)((?:#[\w-]+|\[[^\]]+\])*)$/.exec(part.trim());
+  if (!whole) throw new Error('unsupported selector: ' + part);
+  const tests = [];
+  if (whole[1]) tests.push(el => el.tagName.toLowerCase() === whole[1].toLowerCase());
+  for (const cond of whole[2].match(/#[\w-]+|\[[^\]]+\]/g) || []) {
+    if (cond[0] === '#') {
+      const id = cond.slice(1);
+      tests.push(el => el.attrs.id === id);
+      continue;
+    }
+    const attr = /^\[([\w-]+)(?:(\^?=)"([^"]*)")?\]$/.exec(cond);
+    if (!attr) throw new Error('unsupported condition: ' + cond);
+    const [, name, op, want] = attr;
+    if (!op) tests.push(el => el.attrs[name] !== undefined);
+    else if (op === '=') tests.push(el => el.attrs[name] === want);
+    else tests.push(el => String(el.attrs[name] || '').startsWith(want));
+  }
+  return el => tests.every(test => test(el));
+});
+
+class El {
+  constructor(tag, attrs = {}, text = '') {
+    this.tagName = tag.toUpperCase();
+    this.attrs = attrs;
+    this.text = text;
+    this.children = [];
+    this.parentNode = null;
+  }
+  append(...kids) {
+    for (const kid of kids) { kid.parentNode = this; this.children.push(kid); }
+    return this;
+  }
+  remove() {
+    const parent = this.parentNode;
+    if (!parent) return;
+    parent.children.splice(parent.children.indexOf(this), 1);
+    this.parentNode = null;
+  }
+  /* WhatsApp recycles rows constantly and the watcher checks for it, so the
+     mock has to answer honestly: connected means reachable from the root. */
+  get isConnected() {
+    let node = this;
+    while (node.parentNode) node = node.parentNode;
+    return node.__root === true;
+  }
+  getAttribute(name) { const v = this.attrs[name]; return v === undefined ? null : v; }
+  setAttribute(name, value) { this.attrs[name] = value; }
+  get textContent() { return this.text + this.children.map(c => c.textContent).join(''); }
+  get innerText() {
+    return this.attrs.__innerText !== undefined ? this.attrs.__innerText : this.textContent;
+  }
+  *walk() { for (const kid of this.children) { yield kid; yield* kid.walk(); } }
+  querySelectorAll(sel) {
+    const tests = parseSel(sel);
+    return [...this.walk()].filter(el => tests.some(test => test(el)));
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  contains(other) { let n = other; while (n) { if (n === this) return true; n = n.parentNode; } return false; }
+  /* Pressing a row aims at the middle of it, so there has to be a middle. The
+     numbers do not matter to anything: nothing in the page reads them back. */
+  getBoundingClientRect() { return { left: 0, top: 0, width: 320, height: 72 }; }
+  dispatchEvent(event) { dispatched.push({ on: this, type: event.type }); return true; }
+  closest(sel) {
+    const tests = parseSel(sel);
+    let node = this;
+    while (node) { if (tests.some(test => test(node))) return node; node = node.parentNode; }
+    return null;
+  }
+}
+
+const el = (tag, attrs, text) => new El(tag, attrs, text);
+
+/* --------------------------------------------------------- the chat list */
+
+const root = el('div', {});
+root.__root = true;
+const pane = el('div', { id: 'pane-side' });
+/* #main is the conversation pane, and WhatsApp renders it only while a chat is
+   open -- measured on the live page by walking eight conversations open and
+   shut. Closing the chat here means taking it out. */
+let main = el('div', { id: 'main' });
+root.append(pane, main);
+const closeConversation = () => { main.remove(); };
+const openConversation = () => { if (!main.isConnected) root.append(main); };
+
+const two = n => String(n).padStart(2, '0');
+/* The clock a row wears. Rows carry the time of their last message, and the
+   watcher refuses to call anything older than three minutes an arrival. */
+const clock = (backMinutes = 0) => {
+  const d = new Date(Date.now() - backMinutes * 60000);
+  return (d.getHours() % 12 || 12) + ':' + two(d.getMinutes()) +
+         ' ' + (d.getHours() >= 12 ? 'PM' : 'AM');
+};
+
+/* A row as WhatsApp draws one: the chat name and the message preview in
+   span[title] elements, the unread pill in an aria-label, the sender of a group
+   message as its own line followed by a bare ":" line, and the delivery tick as
+   an <svg> carrying a <title> -- which is where this build puts it. */
+/* The @ badge on its own, for a row that gains one after it was built. */
+const atBadge = () => {
+  const at = el('svg', {});
+  at.append(el('title', {}, 'ic-alternate-email'));
+  return at;
+};
+
+const mkRow = spec => {
+  const row = el('div', { role: 'row' });
+  if (spec.open) row.attrs['aria-selected'] = 'true';
+  /* A group inside a community draws THREE titles: the community, the group and
+     then the message. Measured on the live chat list, where every community row
+     carried one more than a plain chat does. */
+  if (spec.community) row.append(el('span', { title: spec.community }));
+  row.append(el('span', { title: spec.name }), el('span', { title: spec.preview }));
+  if (spec.badge) row.append(el('div', { 'aria-label': spec.badge + ' unread messages' }));
+  if (spec.muted) row.append(el('div', { 'aria-label': 'muted' }));
+  /* The @ badge as this build actually draws it: an <svg> whose only marking is
+     a <title> reading "ic-alternate-email". Nothing on the row contains the word
+     "mention", which is why reading data-icon for it found nothing at all and
+     every mention inside a muted group went silent. */
+  if (spec.mention) {
+    const at = el('svg', {});
+    at.append(el('title', {}, 'ic-alternate-email'));
+    row.append(at);
+  }
+  if (spec.outgoing) {
+    const svg = el('svg', {});
+    svg.append(el('title', {}, 'wds-ic-read'));
+    row.append(svg);
+  }
+  row.__spec = spec;
+  row.paint = () => {
+    const s = row.__spec;
+    const titles = row.querySelectorAll('span[title]');
+    titles[titles.length - 2].setAttribute('title', s.name);
+    titles[titles.length - 1].setAttribute('title', s.preview);
+    const pill = row.querySelectorAll('[aria-label]')
+                    .find(e => /unread/.test(e.attrs['aria-label'] || ''));
+    if (s.badge && pill) pill.setAttribute('aria-label', s.badge + ' unread messages');
+    else if (s.badge) row.append(el('div', { 'aria-label': s.badge + ' unread messages' }));
+    else if (pill) pill.remove();
+    row.attrs.__innerText = [s.community || s.name, s.when]
+        .concat(s.sender ? [s.sender, ':'] : [])
+        .concat([s.preview]).join('\n');
+  };
+  row.paint();
+  return row;
+};
+const update = (row, patch) => { Object.assign(row.__spec, patch); row.paint(); };
+
+/* ------------------------------------------------------------ the sandbox */
+
+let pings = 0;                            // arrivals the page nudged the app about
+const observers = [];
+const logs = [];
+
+const document = {
+  querySelector: sel => root.querySelector(sel),
+  querySelectorAll: sel => root.querySelectorAll(sel),
+  addEventListener() {}, dispatchEvent() {},
+  styleSheets: [], body: el('body', {}), activeElement: null,
+};
+
+const handlers = new Map();                 // channel -> what the page listens with
+
+let inviteFallbacks = [];                   // invites it gave up on and handed back
+let linkFallbacks = [];                     // chat links it gave back to WhatsApp
+let cardReports = [];                       // what it told the desktop's media card
+let openReports = [];                       // what the page said was on screen
+let unreadReports = [];                     // and which chats it said were unread
+let countReports = [];                      // and how many messages, for the badge
+
+/* The app side of the bridge the page is given: the nudge that something
+   arrived, the log, and the two reports the app withdraws notifications on. */
+const send = (channel, payload) => {
+  if (channel === 'arrival') pings++;
+  else if (channel === 'log') logs.push(String(payload));
+  else if (channel === 'open-chat') openReports.push(payload);
+  else if (channel === 'unread-chats') unreadReports.push(payload);
+  else if (channel === 'unread-count') countReports.push(payload);
+  else if (channel === 'invite-unresolved') inviteFallbacks.push(payload);
+  else if (channel === 'link-unresolved') linkFallbacks.push(payload);
+  else if (channel === 'media') cardReports.push(payload);
+};
+const on = (channel, fn) => handlers.set(channel, fn);
+const push = (channel, payload) => {
+  const fn = handlers.get(channel);
+  if (fn) fn(payload);
+};
+
+/* Whatever the page listens to the window for -- the keystroke and the click
+   that mean a message is going out, and the load that starts the watcher. */
+const listeners = new Map();
+const listen = (type, fn) => {
+  if (!listeners.has(type)) listeners.set(type, []);
+  listeners.get(type).push(fn);
+};
+const fire = (type, event) => { for (const fn of listeners.get(type) || []) fn(event); };
+
+/* Just enough of the two audio interfaces for the mute to have something to
+   hook. The page replaces the methods on these prototypes, so what a call proves
+   is which way it went. */
+let played = [];
+class HTMLMediaElement {
+  constructor(where, src) {
+    this.where = where || '';
+    this.tagName = 'AUDIO';
+    this.src = src || '';
+    this.currentTime = 0;
+    this.paused = true;
+    this.ended = false;
+    /* How many times the load algorithm was run, which is what the media
+       controls are taken down by: one load with no src, one with it back. */
+    this.loads = 0;
+    this.handlers = {};
+  }
+  play() {
+    played.push('audio');
+    this.paused = false;
+    this.ended = false;
+    this.fire('play');
+    return Promise.resolve();
+  }
+  pause() { this.paused = true; this.fire('pause'); }
+  /* Playing out to the end, in the order Chromium really does it -- measured
+     in Electron: the position is on the duration and `ended` already answers
+     true when the PAUSE goes out, and the ended event comes after it. This test
+     used to fire them the other way round, and that is exactly why a note that
+     played out was being recycled on the live client and not here. */
+  playOut() {
+    this.currentTime = this.duration;
+    this.ended = true;
+    this.paused = true;
+    this.fire('pause');
+    this.fire('ended');
+  }
+  closest(sel) { return this.where === sel ? {} : null; }
+  getAttribute(name) { return name === 'src' ? (this.src || null) : null; }
+  setAttribute(name, value) { if (name === 'src') this.src = value; }
+  removeAttribute(name) { if (name === 'src') this.src = ''; }
+  /* The load algorithm on an element with no resource empties it, and `emptied`
+     is what says so. That is the event the media card leaves on when a paused
+     note is recycled -- measured in Chromium, and missing here until the card
+     needed it. */
+  load() { this.loads++; if (!this.src) this.fire('emptied'); }
+  addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); }
+  removeEventListener(type, fn) {
+    const list = this.handlers[type];
+    if (list) this.handlers[type] = list.filter(one => one !== fn);
+  }
+  fire(type) { for (const fn of (this.handlers[type] || []).slice()) fn(); }
+}
+class AudioBufferSourceNode {
+  start() { played.push('webaudio'); }
+  connect() {}
+}
+/* Enough of WebAudio for the client's own tone to be decoded and played, which
+   is what the muting of WhatsApp's arrival tone is conditional on: silencing
+   theirs before ours is ready would leave the arrival with no sound at all. */
+class AudioContext {
+  constructor() { this.state = 'running'; this.destination = {}; }
+  decodeAudioData() { return Promise.resolve({ duration: 0.4 }); }
+  createBufferSource() { return new AudioBufferSourceNode(); }
+  resume() { return Promise.resolve(); }
+}
+
+/* Every event the page dispatches at the chat list, in order, with the element
+   it was aimed at. */
+let dispatched = [];
+class MockEvent {
+  constructor(type) { this.type = type; }
+}
+
+/* WhatsApp's own modules, as far as any check needs them to exist. Empty until
+   one fills it in: a page script asking for a name nobody has put here is a page
+   script asking for something it cannot have in production either. */
+const waModules = Object.create(null);
+
+const sandbox = {
+  document, console,
+  navigator: { userAgent: 'test' },
+  location: { host: 'web.whatsapp.com' },
+  setTimeout, clearTimeout, clearInterval,
+  HTMLMediaElement, AudioBufferSourceNode, AudioContext,
+  MouseEvent: MockEvent, PointerEvent: MockEvent,
+  atob: text => Buffer.from(text, 'base64').toString('binary'),
+  /* watchList is installed on an interval in the page; here it runs once and the
+     observer it registers is driven by hand, one pass at a time. */
+  setInterval: fn => { fn(); return 0; },
+  MutationObserver: class {
+    constructor(cb) { this.cb = cb; observers.push(this); }
+    observe() {}
+  },
+  Event: class { constructor(type) { this.type = type; } },
+  addEventListener: listen, dispatchEvent() {},
+  module: { exports: {} },
+  /* The page script is a real CommonJS module -- the preload requires it, in the
+     page's own world, with contextIsolation off -- so it may require the parts of
+     the client that are plain text in and text out. The sandbox has to offer the
+     same, and offer nothing else: anything the page script reached for beyond
+     this would be something it cannot have in production either. */
+  require: name => {
+    if (name === '../wording.js') return require('../src/wording.js');
+    /* The store module is real, and it is asked for here for one reason: to be
+       given a registry that answers for none of the names it needs, so it never
+       resolves and the watcher below stays in charge. That is the fallback this
+       rig exists to exercise -- what the client does on the day WhatsApp renames
+       a module. */
+    if (name === './store.js') return require('../src/page/store.js');
+    if (name === './media.js') return require('../src/page/media.js');
+    /* And the pictures module, for the same reason as the store: the registry
+       this rig hands it answers for nothing, so it installs its listener and
+       then finds no profile-picture collection to ask about any failure. That
+       is the shape of the day WhatsApp renames one of those names, and it must
+       be quiet rather than fatal. */
+    if (name === './pictures.js') return require('../src/page/pictures.js');
+    if (name === './arabic-digits.js') return require('../src/page/arabic-digits.js');
+    if (name === './navigation.js') return require('../src/page/navigation.js');
+    if (name === './motion.js') return require('../src/page/motion.js');
+    if (name === './wallpaper.js') return require('../src/page/wallpaper.js');
+    /* Anything else is a name out of WhatsApp's own registry, which the page
+       reaches for through this same require -- contextIsolation is off, so
+       window.require IS Meta's. The rig answers for a name only once a check has
+       put something under it, and throws otherwise, which is what Meta's require
+       does with a module it does not know. */
+    if (Object.prototype.hasOwnProperty.call(waModules, name)) return waModules[name];
+    throw new Error('the page script may not require ' + name);
+  },
+};
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+/* A movable Date.now, so the 2.5s the watcher waits for the list to settle does
+   not have to be waited out. new Date() stays real: freshness compares a row's
+   clock against the wall clock, and the rows above are stamped from it. */
+vm.runInContext('var __offset = 0; const __real = Date.now; Date.now = () => __real() + __offset;',
+                sandbox);
+vm.runInContext(fs.readFileSync(SRC, 'utf8'), sandbox, { filename: 'inject.js' });
+sandbox.module.exports.start({ send, on });
+/* Notifications off: the shim needs a window.Notification to wrap, and nothing
+   in here raises one. The watcher is what this rig drives. */
+push('config', { notifications: false, muteSendTone: true });
+
+const setFocus = state => push('focus', state);
+
+const advance = ms => { sandbox.__offset += ms; };
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/* One debounced pass of the chat-list watcher, exactly as a DOM change drives
+   it: the observer fires, and the scan lands 150ms later. */
+const scan = async () => { observers.forEach(o => o.cb()); await sleep(200); };
+/* What the app would put on a banner, in one line. */
+const describe = async () => {
+  const answer = await sandbox.window.__waDescribeUnread();
+  if (answer === 'open' || answer === '') return answer;
+  const [chat, sender, message] = answer.split(US);
+  return sender ? chat + ' | ' + sender + ': ' + message : chat + ' | ' + message;
+};
+
+/* -------------------------------------------------------------- the checks */
+
+let failures = 0;
+const check = (label, got, want) => {
+  if (got === want) { console.log('  ok   ' + label); return; }
+  failures++;
+  console.log('  FAIL ' + label + '\n         got  ' + JSON.stringify(got) +
+              '\n         want ' + JSON.stringify(want));
+};
+
+(async () => {
+  console.log('driving ' + SRC + '\n');
+
+  const mega = mkRow({ name: 'Mega', preview: 'ون', when: clock(), badge: 0, open: true });
+  const pdf  = mkRow({ name: 'Pdf & Assignments', preview: 'تيست', when: clock(1),
+                       badge: 1, sender: 'Mega' });
+  const joo  = mkRow({ name: 'EL Joo', preview: 'انجز يلا', when: '12:28 AM', badge: 0 });
+  pane.append(mega, pdf, joo);
+
+  setFocus(true);
+  await scan();                                    // the opening pass seeds the list
+  check('a chat left unread from before the client started is not news',
+        await describe(), '');
+
+  advance(3000);                                   // the list has settled
+  await scan();
+  check('and it is still not news a moment later', await describe(), '');
+
+  /* A message to a chat that is not on screen, and then the extra ask that used
+     to announce it a second time. The app asks more often than messages land --
+     the document title asks on its own count -- and every ask the queue could
+     not answer fell through to the topmost unread row. */
+  update(pdf, { preview: 'تمام', when: clock(), badge: 2 });
+  await scan();
+  check('a message to a chat that is not on screen is announced',
+        await describe(), 'Pdf & Assignments | Mega: تمام');
+  check('the next ask, with nothing queued, stays quiet', await describe(), '');
+  await scan();
+  check('and stays quiet after another pass of the watcher', await describe(), '');
+
+  update(mega, { preview: 'ز', when: clock() });
+  await scan();
+  check('a message in the chat on screen is left to WhatsApp', await describe(), 'open');
+  check('reading one chat does not re-announce the other', await describe(), '');
+
+  /* Typing. A direct chat leaves "typing..." in the preview, a group leaves
+     "Mega is typing..." -- and the second shape used to read as a message. */
+  const before = pings;
+  update(pdf, { preview: 'Mega is typing...', sender: null });
+  await scan();
+  check('a group typing raises no arrival at all', pings - before, 0);
+  check('and nothing is described for it', await describe(), '');
+  update(pdf, { preview: 'تمام', sender: 'Mega' });   // typing stops, message unchanged
+  await scan();
+  check('typing stopping is not an arrival either', await describe(), '');
+
+  /* And typing that starts in the quarter second between the message landing
+     and the app asking about it. */
+  update(pdf, { preview: 'يلا بينا', when: clock(), badge: 3, sender: 'Mega' });
+  await scan();
+  update(pdf, { preview: 'Mega is typing...', sender: null });
+  check('a banner carries the message and its sender, never the typing',
+        await describe(), 'Pdf & Assignments | Mega: يلا بينا');
+
+  /* The one case the guess exists for: a chat too far down the list to have
+     been rendered, moved to the top by a message the watcher never saw arrive. */
+  update(pdf, { preview: 'يلا بينا', sender: 'Mega' });
+  await scan();
+  const deep = mkRow({ name: 'Communication Engineer 4', preview: 'تم',
+                       when: clock(), badge: 1, sender: '~Mo farhat' });
+  pane.append(deep);
+  await scan();
+  check('a row that appears at the top unread is still guessed at',
+        await describe(), 'Communication Engineer 4 | Mo farhat: تم');
+  check('but only once', await describe(), '');
+
+  /* A row that is still unread cannot be the conversation on screen: WhatsApp
+     clears that pill the moment it draws a chat in a focused window. Ten
+     messages landing in a chat sitting at ten unread were every one of them
+     answered "the message is in the chat on screen". */
+  update(mega, { badge: 10, preview: 'E', when: clock() });
+  await scan();
+  check('a chat left at ten unread is not the chat on screen',
+        await describe(), 'Mega | E');
+
+  /* And with no conversation pane at all, nothing is on screen. */
+  update(mega, { badge: 0, preview: 'ok', when: clock() });
+  await scan();
+  await describe();
+  closeConversation();
+  update(mega, { preview: 'tamam', when: clock() });
+  await scan();
+  check('with no conversation open, nothing is the chat on screen',
+        await describe(), 'Mega | tamam');
+  openConversation();
+
+  /* An arrival the app never asked about -- the nudge is dropped whenever the
+     window is not active in the moment it lands -- must not be announced when
+     something else asks a minute later. */
+  update(joo, { preview: 'انجز يلا بقى', when: clock(), badge: 1 });
+  await scan();                                    // queued, and nobody asks
+  advance(20000);
+  update(pdf, { preview: 'اوك', when: clock(), badge: 4, sender: 'Mega' });
+  await scan();
+  check('a queued arrival nobody asked about is not announced later',
+        await describe(), 'Pdf & Assignments | Mega: اوك');
+
+  /* Losing focus empties the queue outright: the page owns notifications from
+     there, and it announces the same messages itself. The row is left with no
+     unread pill so that only the queue can answer for it -- the guess below it
+     never speaks for a chat that is caught up. */
+  update(joo, { preview: 'يلا', when: clock(), badge: 0 });
+  await scan();
+  setFocus(false);
+  setFocus(true);
+  check('the queue does not survive the window going away', await describe(), '');
+
+  /* ------------------------------------------------------- the withdrawals */
+
+  /* What the app takes a notification down on. The unread list is an inference
+     that arrives a beat late; the chat on screen is the answer, and it is the one
+     that has to be right the instant a chat is opened -- opening a chat while its
+     banner was still up used to leave the message in the notification centre for
+     good. */
+  openReports = [];
+  await scan();
+  check('the chat on screen is not reported again when nothing has changed',
+        openReports.length, 0);
+
+  mega.setAttribute('aria-selected', 'false');
+  joo.setAttribute('aria-selected', 'true');
+  await scan();
+  check('opening another chat reports it', openReports.pop(), 'EL Joo');
+
+  /* A chat that was already open when the window went away is being read the
+     moment it comes back, and nothing about the chat itself changes to say so. */
+  openReports = [];
+  setFocus(false);
+  setFocus(true);
+  check('and the window coming back says it again', openReports.pop(), 'EL Joo');
+
+  closeConversation();
+  await scan();
+  check('with no conversation open, nothing is on screen', openReports.pop(), '');
+
+  /* And the slower half of it: the unread list, which is what covers a message
+     read on the phone. */
+  /* The reports are checked for what they SAY and not merely for what they do
+     not say. `(unreadReports.pop() || []).includes(name)` is false when no report
+     arrived at all, so a version of this that only looked for the absence of a
+     name passed while the client sent nothing -- which is the bug it was there to
+     catch. */
+  const reported = () => (unreadReports.length ? unreadReports[unreadReports.length - 1] : null);
+
+  unreadReports = [];
+  update(joo, { badge: 2, preview: 'خلاص؟', when: clock() });
+  await scan();
+  check('a chat going unread is reported', (reported() || []).includes('EL Joo'), true);
+
+  /* Read on the phone: WhatsApp clears the unread pill, and the mutation that
+     clears it is the LAST one the list makes.
+   *
+   * This watcher has no timer behind it -- a MutationObserver and nothing else --
+   * so a chat held inside its grace window used to be a chat judged never again.
+   * The scan the clearing triggers falls inside the grace, keeps the name, and
+   * the banner then sat in the notification centre until the window was opened,
+   * which was simply the next thing to touch the DOM. The grace has to book its
+   * own second look, and this is that: one mutation, then nothing at all.
+   *
+   * Real time rather than the movable clock, because what is being tested is
+   * that a timer was set. */
+  unreadReports = [];
+  update(joo, { badge: 0 });
+  observers.forEach(o => o.cb());
+  await sleep(300);
+  check('and is still held for a moment, in case the pill was merely redrawn',
+        (reported() || ['EL Joo']).includes('EL Joo'), true);
+
+  unreadReports = [];
+  await sleep(2600);                     // nothing whatever touches the list in here
+  check('then dropped on the watcher\'s own timer, with nothing else moving the list',
+        reported(), unreadReports.length ? reported() : null);
+  check('and the report that did it names the other unread chats and not this one',
+        !!reported() && !reported().includes('EL Joo'), true);
+
+  await describe();                      // drain what the badge changes queued
+
+  /* A sticker or media arrival without a preview title is recognized and announced */
+  await describe(); // drain any queued arrival from the unread test above
+  update(pdf, { badge: 5, preview: '', sender: 'Mega', when: clock() });
+  const stickerIcon = el('span', { 'data-icon': 'ic-sticker' });
+  pdf.append(stickerIcon);
+  await scan();
+  check('a sticker message is announced as a sticker, glyph and all',
+        await describe(), 'Pdf & Assignments | Mega: ' + MARKS.sticker);
+  stickerIcon.remove();
+
+
+  /* --------------------------------------------- what is not ours to announce */
+
+  /* A message the user sent themselves. The delivery tick is one signal and the
+     word WhatsApp writes in front of the preview is the other, and the second is
+     what catches a build that has renamed the first -- which is how a banner
+     reading "You: ..." ended up over a message the user had just sent. */
+  await describe();
+  update(pdf, { badge: 0, preview: 'تمام يا معلم', sender: 'You', when: clock() });
+  await scan();
+  check('a message the user sent is not announced, tick or no tick',
+        await describe(), '');
+
+  /* And the same message with somebody else's name on it is. */
+  update(pdf, { badge: 1, preview: 'تمام يا معلم', sender: 'Salah', when: clock() });
+  await scan();
+  check('the same message from somebody else is announced',
+        await describe(), 'Pdf & Assignments | Salah: تمام يا معلم');
+
+  /* A reaction to one of the user's own messages. The row keeps the delivery
+     tick -- the last message in it really is the user's -- so the outgoing guard
+     is exactly what swallowed this, and the phone announces it. */
+  await describe();
+  const reacting = mkRow({ name: 'Salah', preview: 'تمام يا معلم', badge: 0,
+                           when: clock(1), outgoing: true });
+  pane.append(reacting);
+  await scan();
+  /* The wording is WhatsApp's own, copied off the live list: the verb sits in
+     the middle, behind the name of whoever reacted. */
+  update(reacting, { badge: 1, preview: '~Ahmed reacted \u2764\uFE0F to: "\u062a\u0645\u0627\u0645"',
+                     when: clock() });
+  await scan();
+  check('somebody reacting to the user\'s own message is announced',
+        await describe(), 'Salah | ~Ahmed reacted \u2764\uFE0F to: "\u062a\u0645\u0627\u0645"');
+
+  /* The user's own reaction is written the same way with their own name on it,
+     and is caught by the sender test like any other message of theirs. */
+  update(reacting, { badge: 0, sender: 'You',
+                     preview: 'You reacted \u{1F44D} to: "\u062a\u0645\u0627\u0645"',
+                     when: clock() });
+  await scan();
+  check('and the user reacting to somebody else is not',
+        await describe(), '');
+  reacting.remove();
+
+  /* A reply inside a community thread moves the group to the top of the list
+     with the PARENT message still in its preview and a fresh clock on it. Every
+     test an arrival has to pass, it passes -- and the banner would name a
+     message the user has already been told about. */
+  update(pdf, { badge: 2, preview: 'تمام يا معلم', sender: 'Salah', when: clock() });
+  await scan();
+  check('a thread reply re-surfacing the same message is not announced twice',
+        await describe(), '');
+
+  /* Two minutes on, the same words are a new message and are announced again. */
+  advance(3 * 60 * 1000);
+  update(pdf, { badge: 3, preview: 'تمام يا معلم', sender: 'Salah', when: clock() });
+  await scan();
+  check('and the same words a quarter of an hour later are a message again',
+        await describe(), 'Pdf & Assignments | Salah: تمام يا معلم');
+
+  /* ------------------------------------------------------- muting and mentions */
+
+  const club = mkRow({ name: 'Study Group', preview: 'كلام كتير', when: clock(), badge: 1,
+                       sender: 'Ahmed', muted: true });
+  pane.append(club);
+  await scan();                                   // seen for the first time: not news
+  update(club, { badge: 2, preview: 'كلام تاني', when: clock() });
+  await scan();
+  check('a muted group says nothing', await describe(), '');
+
+  /* Unless the user was named in it, which is the one thing that gets through a
+     muted group on the phone as well. */
+  update(club, { badge: 3, preview: 'يا عبدالله شوف دا', when: clock(), mention: true });
+  club.append(atBadge());
+  await scan();
+  check('a mention gets through the muting',
+        await describe(), 'Study Group | Ahmed: يا عبدالله شوف دا');
+  club.remove();
+
+  /* ------------------------------------------------------------ kinds of media */
+
+  /* WhatsApp writes "Photo" into the preview itself when it has one, and a
+     banner reading Photo is indistinguishable from somebody who typed the word.
+     The glyph is what tells them apart, and it is put on the label rather than
+     on the message. */
+  await describe();
+  update(pdf, { badge: 4, preview: 'Photo', sender: 'Mega', when: clock() });
+  await scan();
+  check('a photo is announced as a photo, not as the word',
+        await describe(), 'Pdf & Assignments | Mega: ' + MARKS.image);
+
+  update(pdf, { badge: 5, preview: 'the sticker you sent is great', sender: 'Mega',
+                when: clock() });
+  await scan();
+  check('and a message that merely mentions one is left as it was written',
+        await describe(), 'Pdf & Assignments | Mega: the sticker you sent is great');
+
+
+  /* ------------------------------------------------------ communities */
+
+  /* A group inside a community carries the community's name in front of its own,
+     so the message is the LAST title on the row and not the second. Reading the
+     second announced the name of the chat as though it were the message. */
+  await describe();
+  const community = mkRow({ community: 'Graduation Project', name: 'Graduation project',
+                            preview: 'اول رساله', when: clock(), badge: 1, sender: 'Salah' });
+  pane.append(community);
+  await scan();                                    // first sight: not news
+  update(community, { badge: 2, preview: 'رايح امتى نروح سوا؟', when: clock() });
+  await scan();
+  check('a community message is announced with the message, not the group name',
+        await describe(), 'Graduation Project | Salah: رايح امتى نروح سوا؟');
+  community.remove();
+
+  /* ------------------------------------------------------- voice notes */
+
+  /* A voice note has no words, so WhatsApp puts its LENGTH in the preview: the
+     row reads "0:41". A banner saying 0:41 says nothing. */
+  await describe();
+  update(pdf, { badge: 6, preview: '0:41', sender: 'Mega', when: clock() });
+  const voiceIcon = el('span', { 'data-icon': 'ic-keyboard-voice-filled' });
+  pdf.append(voiceIcon);
+  await scan();
+  check('a voice note is announced as one, with its length kept',
+        await describe(), 'Pdf & Assignments | Mega: \u{1f3a4} Voice message (0:41)');
+  voiceIcon.remove();
+
+
+  /* ------------------------------------------------------------- the badge */
+
+  /* The number the launcher draws. The document title cannot supply it: it counts
+     unread CHATS and leaves muted ones out of even that. Measured on the live
+     account, the title read "(3)" while six chats were unread holding eleven
+     messages between them. */
+  await describe();
+  /* The rows the earlier checks left unread would be counted too, and this is a
+     check about arithmetic rather than about them. The watcher also remembers a
+     chat that has stopped being rendered for a minute, so the clock is moved past
+     that before the count is read. */
+  for (const row of pane.children) if (row.__spec) update(row, { badge: 0 });
+  advance(120000);
+  await scan();
+  await scan();
+  await describe();
+  countReports = [];
+  const loud  = mkRow({ name: 'Loud Group', preview: 'واحد', when: clock(), badge: 3,
+                        sender: 'Ali' });
+  const quiet = mkRow({ name: 'Quiet Group', preview: 'اتنين', when: clock(), badge: 7,
+                        sender: 'Sara', muted: true });
+  pane.append(loud, quiet);
+  await scan();
+  const counted = countReports.pop();
+  check('the badge counts messages, not chats', counted && counted.messages, 3);
+  check('and leaves a muted chat out of it', counted && counted.chats, 1);
+
+  /* A mention in a muted group is not muted, and does count. */
+  update(quiet, { badge: 8, preview: 'يا عبدالله', when: clock(), mention: true });
+  quiet.append(atBadge());
+  await scan();
+  const withMention = countReports.pop();
+  check('a mention inside a muted group counts again',
+        withMention && withMention.messages, 11);
+  loud.remove(); quiet.remove();
+  await describe();
+
+  /* ----------------------------------------------- the tone of a message out */
+
+  /* Muted by the moment rather than by name: WhatsApp serves its sounds from
+     hashed filenames that change with the build, so the moment is all there is to
+     match on. */
+  const SEND_TONE_GAP = 2000;        // longer than the beat a send is muted for
+  const composer = el('div', { contenteditable: 'true' });
+  const sendButton = el('span', { 'data-icon': 'wds-ic-send-filled' });
+
+  played = [];
+  new sandbox.HTMLMediaElement('').play();
+  check('a sound with no message going out is left alone', played.join(), 'audio');
+
+  played = [];
+  fire('keydown', { key: 'Enter', target: composer });
+  new sandbox.HTMLMediaElement('').play();
+  new sandbox.AudioBufferSourceNode().start();
+  check('the tone for a message going out is muted, either way a page plays one',
+        played.join(), '');
+
+  advance(SEND_TONE_GAP);            // out of the window the last Enter opened
+  played = [];
+  fire('pointerdown', { target: sendButton });
+  new sandbox.HTMLMediaElement('').play();
+  check('and muted for a click on send, which is how a picture goes', played.join(), '');
+
+  played = [];
+  fire('keydown', { key: 'Enter', target: composer });
+  new sandbox.HTMLMediaElement('#main').play();
+  check('a voice note in the conversation still plays', played.join(), 'audio');
+
+  advance(SEND_TONE_GAP);
+  played = [];
+  fire('keydown', { key: 'Enter', shiftKey: true, target: composer });
+  new sandbox.HTMLMediaElement('').play();
+  check('Shift+Enter is a newline, not a message going out', played.join(), 'audio');
+
+  played = [];
+  fire('keydown', { key: 'Enter', target: composer });
+  advance(SEND_TONE_GAP);
+  new sandbox.HTMLMediaElement('').play();
+  check('and somebody else writing two seconds later still rings', played.join(), 'audio');
+
+  /* ---------------------------------------------- the tone of a message in */
+
+  /* The other half of the same idea. WhatsApp announces an arrival itself only
+     while the window is away, and it does it with a tone of its own -- so the
+     same message sounded one way in front of the user and another behind them.
+     The client plays the desktop's tone for both now, which means this one has
+     to go. */
+  push('config', { notifications: false, muteSendTone: true, mutePageTone: true });
+  advance(SEND_TONE_GAP);
+
+  played = [];
+  new sandbox.HTMLMediaElement('').play();
+  check('with no tone of its own yet, the client leaves WhatsApp to announce it',
+        played.join(), 'audio');
+
+  push('tone', { data: Buffer.from('a tone').toString('base64'), mime: 'audio/ogg' });
+  await sleep(0);                                  // decoded on a microtask
+
+  played = [];
+  new sandbox.HTMLMediaElement('').play();
+  new sandbox.AudioBufferSourceNode().start();
+  check('the tone for a message arriving is muted once the client has one',
+        played.join(), '');
+
+  played = [];
+  push('play-tone', null);
+  await sleep(0);
+  check("and the client's own tone plays straight through the muting",
+        played.join(), 'webaudio');
+
+  played = [];
+  const ringing = new sandbox.HTMLMediaElement('');
+  ringing.loop = true;
+  ringing.play();
+  check('a call ringing is never muted, whatever else is', played.join(), 'audio');
+
+  /* ------------------------------------------ the desktop's media controls */
+
+  /* A paused voice note used to leave its card in the notification centre until
+     the note had played out: Chromium keeps a paused player in its media
+     session, and the shell shows every session it can see. Taking the resource
+     away and handing it straight back drops the player without dropping the
+     note -- two runs of the load algorithm, the src back where it was, and the
+     position kept. */
+  const note = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/a-voice-note');
+  note.duration = 8.4;
+  note.play();
+  note.currentTime = 2.5;
+  note.pause();
+  check('pausing a voice note takes its resource away and hands it back',
+        note.loads, 2);
+  check('and the src is the one it had',
+        note.src, 'blob:https://web.whatsapp.com/a-voice-note');
+  note.currentTime = 0;                    // what the load algorithm would leave
+  note.fire('loadedmetadata');
+  check('and it is left where the user stopped it', note.currentTime, 2.5);
+
+  /* A press that lands while the src is on its way back has to wait for it:
+     play() on an element with no resource rejects, and the note would be
+     stuck. */
+  const raced = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/raced');
+  raced.play();
+  raced.currentTime = 1;
+  raced.pause();
+  played = [];
+  const pressed = raced.play();
+  check('a press inside that window does not reach the element yet', played.join(), '');
+  raced.fire('loadedmetadata');
+  await pressed;
+  check('and lands once the src is back', played.join(), 'audio');
+
+  /* The end of a note is Chromium's own business -- it drops that player by
+     itself. Recycling there is worse than a reload for nothing: WhatsApp
+     rewinds a finished note, the restore's seek would put it back at the end,
+     and a note parked at its end does not play again. */
+  const finished = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/finished');
+  finished.duration = 8.4;
+  finished.play();
+  finished.playOut();
+  check('a note that played out is left alone', finished.loads, 0);
+  check('and it still has the src WhatsApp will rewind',
+        finished.src, 'blob:https://web.whatsapp.com/finished');
+
+  /* The same moment, arriving a hair short of the duration. */
+  const nearly = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/nearly');
+  nearly.duration = 8.4;
+  nearly.play();
+  nearly.currentTime = 8.38;
+  nearly.pause();
+  check('and so is one stopped inside the last of it', nearly.loads, 0);
+
+  /* Everything that is not a recording somebody chose to listen to. */
+  const tone = new sandbox.HTMLMediaElement('', 'https://static.whatsapp.net/l-ut9G1w4eu.ogg');
+  tone.play();
+  tone.pause();
+  check("and so is a tone of WhatsApp's own", tone.loads, 0);
+
+  const ring = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/ringing');
+  ring.loop = true;
+  ring.play();
+  ring.pause();
+  check('and so is a call ringing', ring.loads, 0);
+
+  /*
+   * And what the CLIENT'S OWN card is told, which is a different player from
+   * the one every check above is about.
+   *
+   * That one is Chromium's. This process registers an MPRIS player of its own
+   * and it answered CanPlay true from the moment it took its name -- and
+   * gnome-shell draws a card for every player whose canPlay is true, reading
+   * PlaybackStatus only to pick the button. So the client put a card in the
+   * notification centre at launch and left it there, carrying the placeholder
+   * title it was constructed with. The report was a call answered on the phone
+   * with a WhatsApp card still sitting there; measured on the live bus,
+   * PlaybackStatus "Paused", CanPlay true, title "WhatsApp Voice Message",
+   * Position 0, and nothing had ever played.
+   */
+  cardReports = [];
+  const ringAgain = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/ringing-2');
+  ringAgain.loop = true;
+  ringAgain.play();
+  ringAgain.pause();
+  check('a call ringing raises no card at all', cardReports.length, 0);
+
+  cardReports = [];
+  const streamed = new sandbox.HTMLMediaElement('');
+  streamed.srcObject = {};
+  streamed.play();
+  check('and neither does the call itself', cardReports.length, 0);
+
+  cardReports = [];
+  const carded = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/carded');
+  carded.duration = 8.4;
+  carded.play();
+  check('a voice note raises one', cardReports.map(r => r.state).join(','), 'playing');
+  check('and it carries how long the note is', cardReports[0].durationSec, 8.4);
+
+  /* Paused, and then the resource taken away by the recycle above -- so the
+     client's card leaves at the same moment Chromium's does, which is what the
+     "hide the controls when it is paused" setting already meant. */
+  cardReports = [];
+  carded.currentTime = 2.5;
+  carded.pause();
+  check('pausing it reports the pause and then the end of the resource',
+        cardReports.map(r => r.state).join(','), 'paused,stopped');
+
+  cardReports = [];
+  const played2 = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/played-out');
+  played2.duration = 4;
+  played2.play();
+  cardReports = [];
+  played2.playOut();
+  /* The end arrives as a pause before it arrives as `ended`, so the card is
+     taken down by reading the element rather than by waiting for the event --
+     otherwise it would sit there offering to resume a note that has finished. */
+  check('a note played out takes its card down', cardReports[0].state, 'stopped');
+
+  /* The note is detached from the DOM, just as WhatsApp's real player is.
+     Desktop controls must reach the element that raised the card, even when
+     older notes and call audio exist beside it. */
+  const controlled = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/controlled');
+  controlled.duration = 12;
+  controlled.play();
+  controlled.currentTime = 3;
+  push('media-control', 'pause');
+  check('desktop Pause reaches the detached voice note', controlled.paused, true);
+  controlled.fire('loadedmetadata');
+  check('and keeps its playback position', controlled.currentTime, 3);
+  push('media-control', 'play');
+  check('desktop Play resumes that same note', controlled.paused, false);
+  played = [];
+  push('media-control', 'play');
+  check('Play does not restart an already playing note', played.length, 0);
+  push('media-control', 'playPause');
+  check('desktop PlayPause pauses the current note', controlled.paused, true);
+  push('media-control', 'playPause');
+  controlled.fire('loadedmetadata');
+  await Promise.resolve();
+  check('and resumes it while its resource is being restored', controlled.paused, false);
+
+  const successor = new sandbox.HTMLMediaElement('', 'blob:https://web.whatsapp.com/successor');
+  successor.duration = 12;
+  successor.play();
+  cardReports = [];
+  controlled.pause();
+  controlled.fire('loadedmetadata');
+  check('a late pause from the previous note cannot hide the current card', cardReports.length, 0);
+  push('media-control', 'pause');
+  check('the desktop now controls the successor', successor.paused, true);
+  check('and leaves the older note paused', controlled.paused, true);
+  successor.fire('loadedmetadata');
+  push('media-control', 'play');
+  successor.currentTime = 5;
+  push('media-control', 'pause');
+  push('media-control', 'stop');
+  successor.fire('loadedmetadata');
+  await Promise.resolve();
+  check('Stop during restoration still rewinds the note', successor.currentTime, 0);
+  check('and reports it stopped', cardReports[cardReports.length - 1].state, 'stopped');
+
+  /* A ringtone or call that starts after a note must never replace the note
+     being controlled or get resumed by a desktop Play request. */
+  ringAgain.play();
+  streamed.play();
+  push('media-control', 'play');
+  check('Play selects the voice note rather than a call or ringtone', successor.paused, false);
+  push('media-control', 'pause');
+  check('desktop Pause leaves the ringtone alone', ringAgain.paused, false);
+  check('and leaves the call stream alone', streamed.paused, false);
+  successor.fire('loadedmetadata');
+
+  /* ------------------------------------------ opening a chat from a banner */
+
+  /* A banner is a message, and clicking one is asking to read it. The page is
+     given the chat by name and presses the row, because that is the only way in
+     to a conversation from out here. */
+  dispatched = [];
+  push('open-chat-request', 'EL Joo');
+  check('clicking a banner presses the row for its chat',
+        dispatched.map(d => d.type).join(','),
+        'pointerdown,mousedown,pointerup,mouseup,click');
+  /* Aimed at the name and not at the row: the handler that opens a conversation
+     is inside the row, and an event that starts at the row travels away from it.
+     That was measured on the live page, and it is the whole reason this presses
+     what it presses. */
+  check('and it is aimed inside that row and not at the row itself',
+        dispatched.length ? dispatched[0].on.getAttribute('title') : '',
+        'EL Joo');
+
+  dispatched = [];
+  push('open-chat-request', 'Somebody Not In The List');
+  check('a chat the list is not showing is left alone rather than guessed at',
+        dispatched.length, 0);
+
+  /* ------------------------------------------------ two chats, one name */
+
+  /* A community and a group inside it can carry the same name, and on the
+     account this was written against two do. Nothing a lookup by name can see
+     tells them apart, so the banner has to remember which row it was made from
+     -- and that token is what the click carries back. */
+  await describe();
+  for (const row of pane.children) if (row.__spec) update(row, { badge: 0 });
+  advance(120000);
+  await scan();
+  await describe();
+
+  const twinA = mkRow({ name: 'Same Name', preview: 'الاولانى', when: clock(), badge: 0,
+                        sender: 'Ali' });
+  const twinB = mkRow({ name: 'Same Name', preview: 'التانية', when: clock(), badge: 0,
+                        sender: 'Sara' });
+  pane.append(twinA, twinB);
+  await scan();                                   // both seen for the first time
+
+  /* The SECOND of the two receives a message; the first is left alone. */
+  update(twinB, { badge: 1, preview: 'دى بتاعة التانية', when: clock() });
+  await scan();
+  const answer = await sandbox.window.__waDescribeUnread();
+  const parts = answer.split(US);
+  check('the banner names the chat', parts[0], 'Same Name');
+  check('and carries a token for the row it was made from', !!parts[4], true);
+
+  dispatched = [];
+  push('open-chat-request', { token: parts[4], name: parts[0], preview: parts[2] });
+  check('clicking it opens the row it came from, not the first of that name',
+        dispatched.length ? dispatched[0].on.parentNode : null, twinB);
+
+  /* And with the row recycled out from under it, the message still finds it. */
+  dispatched = [];
+  push('open-chat-request', { token: 'gone', name: 'Same Name', preview: 'دى بتاعة التانية' });
+  check('and finds it again by its message when the row has been replaced',
+        dispatched.length ? dispatched[0].on.parentNode : null, twinB);
+
+  twinA.remove(); twinB.remove();
+
+  /* A WhatsApp Web update changed this action from a WID argument to an
+     options object. Its own catch resolves even on failure, so onOpened is
+     the success signal and /send is the fallback. */
+  const linkRequests = [];
+  let linkOpens = true;
+  waModules['WAWebWidFactory'] = {
+    createUserWidOrThrow: phone => ({ user: phone }),
+  };
+  waModules['WAWebChatEntryPoint'] = { ChatEntryPoint: { Link: 'Link' } };
+  waModules['WAWebOpenChatWithContactAction'] = {
+    openChatWithContact: request => {
+      linkRequests.push(request);
+      if (linkOpens) request.opts.onOpened();
+      return Promise.resolve();
+    },
+  };
+  push('open-link', { phone: '201234567890', wantsText: false });
+  await sleep(10);
+  check('a chat link passes the contact in the current action object',
+        linkRequests[0].targetId.user, '201234567890');
+  check('a confirmed chat opening needs no page reload', linkFallbacks.length, 0);
+  linkOpens = false;
+  push('open-link', { phone: '201234567891', wantsText: false });
+  await sleep(10);
+  check('an action that silently fails uses WhatsApp\'s own send page',
+        linkFallbacks[0]?.phone, '201234567891');
+
+  /* ---------------------------------------------------------- group invites */
+
+  /*
+   * A group invite link, followed from a browser: WhatsApp's own join dialog,
+   * put up over the chat list rather than paid for with a page load.
+   *
+   * What this rig holds still is the part that was got wrong first. Asked while
+   * WhatsApp is still booting -- which is exactly when a link that STARTED the
+   * client arrives -- ModalManager takes the call and nothing appears; sampled
+   * every 200ms through a cold start, the dialog was never on the page for a
+   * single frame. So the page waits for the chat list, and these are the checks
+   * that it waits, that it asks again if the dialog still did not arrive, and
+   * that it does not ask twice over one that did.
+   */
+  waModules['react'] = { createElement: (type, props) => ({ type, props }) };
+  waModules['WAWebGroupInviteLinkModalLoadable.react'] = {
+    WAWebGroupInviteLinkModalLoadable: function GroupInviteLinkModal() {},
+  };
+
+  const asked = [];
+  let modalLands = true;
+  const dialog = el('div', { role: 'dialog' });
+  waModules['WAWebModalManager'] = {
+    ModalManager: {
+      open: (element, options) => {
+        asked.push({ element, options });
+        if (modalLands) root.append(dialog);
+      },
+    },
+  };
+
+  pane.remove();
+  push('open-invite', { code: 'IZ4FM0ZHJRN7hMFsxlQTcx' });
+  await sleep(600);
+  check('an invite waits while WhatsApp has not drawn a chat list yet', asked.length, 0);
+
+  root.append(pane);
+  await sleep(600);
+  check('and goes up as WhatsApp\'s own dialog once it has', asked.length, 1);
+  check('carrying the code the link came with',
+        asked.length ? asked[0].element.props.groupCode : null, 'IZ4FM0ZHJRN7hMFsxlQTcx');
+  check('and the source the live page passes for one',
+        asked.length ? asked[0].element.props.source : null, 'invite_link');
+
+  await sleep(INVITE_SETTLE_MS + 200);
+  check('a dialog that arrived is not asked for a second time', asked.length, 1);
+
+  /* And the same again with a ModalManager that swallows it, which is the cold
+     start this was written for. */
+  asked.length = 0;
+  modalLands = false;
+  dialog.remove();
+  push('open-invite', { code: 'IZ4FM0ZHJRN7hMFsxlQTcx' });
+  await sleep(600);
+  check('one that did not arrive is asked for once more', asked.length, 1);
+  await sleep(INVITE_SETTLE_MS + 200);
+  check('and it is', asked.length, 2);
+  await sleep(INVITE_SETTLE_MS + 200);
+  check('once more, and once only', asked.length, 2);
+  check('and the app is asked for WhatsApp\'s own page instead',
+        inviteFallbacks.length ? inviteFallbacks[0].code : null, 'IZ4FM0ZHJRN7hMFsxlQTcx');
+
+  push('open-invite', { code: '' });
+  await sleep(600);
+  check('a link with no code in it asks for nothing', asked.length, 2);
+
+  console.log(failures ? '\n' + failures + ' failed' : '\nall checks pass');
+  process.exit(failures ? 1 : 0);
+})();

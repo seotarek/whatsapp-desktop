@@ -1,0 +1,70 @@
+Filed Fedora Package Review:
+https://bugzilla.redhat.com/show_bug.cgi?id=2548541
+Status at filing: NEW. Blocks FE-NEEDSPONSOR (tracker #177841).
+
+Follow-up published on 2026-10-10 (Cairo), after the 2026-10-09 devel feedback:
+Fedora Rawhide already provides nodejs-electron 43.2.0-1.fc46. SPEC revision 2
+uses Electron >= 43, < 44 and corrects the desktop window class after basic
+runtime checks. See fedora-runtime-check.md and the new review snapshot:
+https://github.com/seotarek/whatsapp-desktop/releases/tag/packaging-review-2026-10-10-fedora43
+The maintainer authorized the follow-up; it was sent/posted and public
+visibility was verified at all three destinations:
+Fedora devel reply:
+https://lists.fedoraproject.org/archives/list/devel@lists.fedoraproject.org/message/FMU2S7YOLQY33XZLSWI5BDIJ3XWGHASQ/
+Bugzilla comment 1:
+https://bugzilla.redhat.com/show_bug.cgi?id=2548541#c1
+Packager sponsorship follow-up:
+https://forge.fedoraproject.org/packaging/sponsors/issues/802#issuecomment-1364993
+The review remains NEW with FE-NEEDSPONSOR; no review approval or sponsorship
+has been granted. These updates are not archive acceptance.
+The original submitted text below is retained as a historical record;
+its statement about Fedora runtime availability was incomplete.
+
+Bugzilla title:
+Review Request: whatsapp-desktop - Independent desktop client for WhatsApp Web
+
+Submitted description (the live ticket also links the Fedora devel discussion):
+
+Spec URL:
+https://github.com/seotarek/whatsapp-desktop/releases/download/packaging-review-2026-10-09/whatsapp-desktop.spec
+
+SRPM URL:
+https://github.com/seotarek/whatsapp-desktop/releases/download/packaging-review-2026-10-09/whatsapp-desktop-1.9.12-1.fc44.src.rpm
+
+Description:
+Independent desktop client for WhatsApp Web with system tray integration,
+desktop notifications, themes, configurable fonts and privacy controls. It
+requires an existing WhatsApp account and Internet access. The project is not
+affiliated with Meta or WhatsApp.
+
+The application is GPL-3.0-or-later, its WhiteSur-derived artwork GPL-3.0-only,
+and its AppStream metadata CC0-1.0. Artwork sources and license notices are
+included in the source archive.
+
+This source-only application proposal installs JavaScript and data and depends
+on a distribution-owned Electron >= 40, < 41 runtime. It neither downloads
+Electron nor runs npm during the build. The application package and tests pass
+in a clean Fedora 44 environment, with zero rpmlint errors or warnings.
+
+Runtime prerequisite:
+Electron is not currently packaged in the target Fedora repositories. This
+proposal does not complete Electron's source build, dependency packaging or
+security maintenance and cannot currently be installed from the official
+archives. I seek guidance on the runtime prerequisite and the eligibility of
+this independent client; final review/acceptance must wait for these matters.
+
+I am a new Fedora contributor and need a package-maintainer sponsor.
+
+Fedora Account System Username: seotarek
+
+Upstream URL:
+https://github.com/seotarek/whatsapp-desktop
+
+Packaging implementation and validation:
+https://github.com/seotarek/whatsapp-desktop/pull/6
+
+Debian ITP (blocked by Electron RFP #842420):
+https://bugs.debian.org/1150415
+
+This review request is not archive acceptance. Packager sponsorship, review and
+Electron source packaging/security maintenance remain prerequisites.

@@ -1,0 +1,256 @@
+/*
+ * What the tray's one item says, and what it does when it is clicked.
+ *
+ * Every check here is a way the item has been wrong on somebody's screen. The
+ * icon itself cannot be tested -- it needs a session bus, a status icon host and
+ * a hand to click it -- but the decision behind it is ordinary code and this is
+ * all of it: which word the item wears, which of show and hide a click runs, and
+ * what happens to both while the desktop is drawing the menu.
+ *
+ * The item is driven here the way a host drives it: `opened`, then the question
+ * the popup asks (AboutToShow, which is refreshToggle), then `clicked`, then
+ * `closed`.
+ */
+'use strict';
+
+/* The class asks Electron for an icon in its constructor and nothing else, so a
+   stub with a size and no pixels is the whole of what it needs. */
+const Module = require('module');
+const load = Module._load;
+const electron = {
+  nativeImage: {
+    createFromPath: () => ({
+      isEmpty: () => true,
+      getSize: () => ({ width: 0, height: 0 }),
+      toBitmap: () => Buffer.alloc(0),
+    }),
+  },
+};
+let SniTray, ID;
+try {
+  Module._load = function (request, ...args) {
+    return request === 'electron' ? electron : load.call(this, request, ...args);
+  };
+  ({ SniTray, ID } = require('../src/tray-sni.js'));
+} finally {
+  Module._load = load;
+}
+
+let failures = 0;
+const check = (label, got, want) => {
+  if (got === want) { console.log('  ok   ' + label); return; }
+  failures++;
+  console.log('  FAIL ' + label +
+              '\n         got  ' + JSON.stringify(got) +
+              '\n         want ' + JSON.stringify(want));
+};
+
+/* A tray with a window behind it that this test moves about, and handlers that
+   only write down that they ran. */
+const build = () => {
+  const window = { inFront: false };
+  const ran = [];
+  /* What the last update check found, which one item's wording is drawn from. */
+  const update = { found: null };
+  const tray = new SniTray({
+    normal: '/nonexistent.png',
+    onShow: () => ran.push('show'),
+    onHide: () => ran.push('hide'),
+    onToggle: () => ran.push('toggle'),
+    onQuit: () => ran.push('quit'),
+    onSettings: () => ran.push('settings'),
+    onFonts: () => ran.push('fonts'),
+    onAbout: () => ran.push('about'),
+    getUpdate: () => update.found,
+    getInFront: () => window.inFront,
+  });
+  /* The item is told where the window is as the window moves, exactly as
+     main.js tells it. */
+  window.moveTo = where => { window.inFront = where; tray.setInFront(where); };
+  /* One open of the menu, and what the item said while it was open. */
+  const openMenu = () => { tray.handle(ID.ROOT, 'opened'); tray.refreshToggle(); return label(); };
+  const closeMenu = () => tray.handle(ID.ROOT, 'closed');
+  const click = () => tray.handle(ID.TOGGLE, 'clicked');
+  const label = () => tray.itemProps(ID.TOGGLE, ['label'])[0][1][1];
+  const labelOf = id => tray.itemProps(id, ['label'])[0][1][1];
+  return { window, ran, tray, update, openMenu, closeMenu, click, label, labelOf };
+};
+
+/* --------------------------------------------------------- the two states */
+
+{
+  const t = build();
+  t.window.moveTo(true);
+  check('a window the owner is looking at is offered to the tray',
+        t.openMenu(), 'Minimize to Tray');
+  t.click();
+  check('and clicking that puts it there', t.ran.join(), 'hide');
+}
+
+{
+  const t = build();
+  t.window.moveTo(false);
+  check('a window that is away is offered back',
+        t.openMenu(), 'Open WhatsApp');
+  t.click();
+  check('and clicking that fetches it', t.ran.join(), 'show');
+}
+
+/* ------------------------------------------------- up, but behind something */
+
+/* The report this last round answers: the window was on screen the whole time,
+   which is why the item used to offer to hide it -- but it was behind the
+   editor, and what the owner wanted was to be shown it. */
+{
+  const t = build();
+  t.window.moveTo(false);          // on screen, not in front: main.js's answer
+  check('a window standing behind another one is fetched, not put away',
+        t.openMenu(), 'Open WhatsApp');
+  t.click();
+  check('and its click opens rather than hides', t.ran.join(), 'show');
+}
+
+/* ------------------------------------------- while the desktop is drawing it */
+
+/*
+ * Opening a status icon menu on GNOME takes the keyboard off the window, so the
+ * window blurs a moment after the popup appears. main.js holds that back for a
+ * grace, and when the grace runs out it says so -- which lands while the owner
+ * is still reading the menu. The word must not move under their hand, and the
+ * click that follows must do what the word said.
+ */
+{
+  const t = build();
+  t.window.moveTo(true);
+  const drawn = t.openMenu();
+  t.window.moveTo(false);          // the grace running out, mid-popup
+  check('the word does not change under an open menu', t.label(), drawn);
+  t.click();
+  check('and the click does what the word said', t.ran.join(), 'hide');
+}
+
+/* And once the popup is gone the item catches up with the window, so that the
+   next popup is drawn from a cache that is right. */
+{
+  const t = build();
+  t.window.moveTo(true);
+  t.openMenu();
+  t.window.moveTo(false);
+  t.closeMenu();
+  check('a closed menu reads the window again', t.label(), 'Open WhatsApp');
+}
+
+/* ------------------------------------------------------ the reported bug */
+
+/*
+ * Hide from the tray, open the tray again: the item used to still say "Minimize
+ * to Tray", and clicking it did nothing at all -- it hid a window that was
+ * already hidden. The second open said "Open WhatsApp", one open too late.
+ */
+{
+  const t = build();
+  t.window.moveTo(true);
+  t.openMenu();
+  t.click();                        // hide, as the word said
+  t.window.moveTo(false);           // the window goes, and says so
+  t.closeMenu();
+  check('after hiding from the tray the item offers the window back',
+        t.openMenu(), 'Open WhatsApp');
+  t.ran.length = 0;
+  t.click();
+  check('and that click opens it rather than hiding it again', t.ran.join(), 'show');
+}
+
+/* -------------------------------------------------- about, and the update */
+
+/*
+ * One item added after the menu had already been in front of people, and
+ * everything it leads to -- the version, the site, the check -- is in the window
+ * behind it rather than out here. It runs one handler and nothing else.
+ */
+{
+  const t = build();
+  t.tray.handle(ID.ABOUT, 'clicked');
+  check('About opens the about window', t.ran.join(), 'about');
+}
+
+/* The two windows this menu opens, each on its own item and each opening the
+   window it names -- Fonts is not Settings scrolled somewhere. */
+{
+  const t = build();
+  t.tray.handle(ID.SETTINGS, 'clicked');
+  t.tray.handle(ID.FONTS, 'clicked');
+  check('Settings and Fonts open a window each', t.ran.join(), 'settings,fonts');
+  check('and Fonts is on the menu, under Settings',
+        t.labelOf(ID.FONTS), 'Fonts…');
+}
+
+/*
+ * The one thing this menu announces. Nothing here pops up and the check happens
+ * on its own once a day, so an item that never mentioned what it found would
+ * leave a release sitting behind a window nobody had a reason to open.
+ */
+{
+  const t = build();
+  check('with nothing checked yet the item is just a way in',
+        t.labelOf(ID.ABOUT), 'About WhatsApp');
+
+  t.update.found = { current: '1.6.6', latest: '1.6.6', newer: false };
+  check('a version that is the latest is not announced',
+        t.labelOf(ID.ABOUT), 'About WhatsApp');
+
+  t.update.found = { current: '1.6.6', error: 'no connection to the internet' };
+  check('and neither is a check that could not be made',
+        t.labelOf(ID.ABOUT), 'About WhatsApp');
+
+  t.update.found = { current: '1.6.6', latest: '1.6.7', newer: true };
+  check('a release that is out is named on the item',
+        t.labelOf(ID.ABOUT), 'About WhatsApp — 1.6.7 is out');
+}
+
+/* ------------------------------------------------------------ the numbers */
+
+/*
+ * The ids are the reason this file exists at all: Electron's tray renumbered
+ * every item whenever the menu changed, gnome-shell went on drawing the popup it
+ * had cached, and the click carried an id nobody answered to. Nothing about a
+ * word changing may move a number.
+ */
+{
+  const t = build();
+  const ids = () => {
+    const walk = ([id, , children]) => [id, ...children.flatMap(c => walk(c[1]))];
+    return walk(t.tray.layout(ID.ROOT, -1, [])).join();
+  };
+  t.window.moveTo(true);
+  const before = ids();
+  t.window.moveTo(false);
+  check('the menu keeps its numbers when its word changes', ids(), before);
+  check('and the item a host clicks is the one that was drawn', before.split(',')[1], '1');
+
+  /* The items added in 1.6.7 were given numbers after the ones that were
+     already out, and the ones already out did not move. A host is entitled to
+     remember any of them.
+
+     12 is Fonts, added later still and dropped into the menu under Settings --
+     which is what a new item is allowed to do. Where an item SITS is the order
+     of this list; what it IS, is its number, and every number here is where it
+     was: Quit is 9 and About is 11 whatever gets added above them.
+
+     4, 5, 6 and 7 were Theme and its three modes, and they are not here because
+     the item is gone -- the same switch is in the settings window. Gone, not
+     renumbered: nothing else has taken those four ids, which is the whole rule
+     this test is here to keep. */
+  check('every item still has the number it was given',
+        before, '0,1,2,3,12,10,11,8,9');
+  check('and a retired number is not handed to something else',
+        [4, 5, 6, 7].map(id => t.tray.itemProps(id, []).length).join(), '0,0,0,0');
+
+  /* And the wording of one of them moving is no more a layout change than the
+     toggle's is. */
+  t.update.found = { current: '1.6.6', latest: '1.6.7', newer: true };
+  check('a release being found renumbers nothing', ids(), before);
+}
+
+console.log(failures ? `\n${failures} failed` : '\ntray checks pass');
+process.exit(failures ? 1 : 0);

@@ -1,0 +1,238 @@
+# whatsapp-desktop -- WhatsApp Web in a window of its own.
+#
+# There is no compile step. `make install` stages a self-contained tree: a copy
+# of Electron with its binary renamed, the app under resources/app where that
+# binary looks for it, and a two-line launcher in bin.
+#
+# The rename is not cosmetic. Electron takes the application name from the name
+# of the executable, and that name becomes the window's app_id -- which is how
+# the desktop matches a window to its .desktop file, and so to its icon and its
+# name in the switcher. Left as "electron", every window belongs to Electron.
+
+PREFIX  ?= $(HOME)/.local
+DESTDIR ?=
+VERSION ?= $(shell node -p "require('./package.json').version")
+
+APP_ID  = io.github.seotarek.whatsapp-desktop
+BIN     = whatsapp-desktop
+
+bindir       = $(PREFIX)/bin
+libdir       = $(PREFIX)/lib/$(BIN)
+appdir       = $(PREFIX)/share/applications
+icontheme    = $(PREFIX)/share/icons/hicolor
+autostartdir = $(HOME)/.config/autostart
+
+ELECTRON  = node_modules/electron/dist
+SYSTEM_ELECTRON ?= /usr/bin/electron
+systemappdir = $(PREFIX)/share/$(BIN)
+ICON_SIZES = 16 22 24 32 48 64 128 256
+
+# Chromium ships 55 translations of a user interface this app never shows: no
+# menu bar, no settings, no tabs. They are 45 MB of the 290 MB tree, and what is
+# actually read from them is the odd context menu and file dialog, which fall
+# back to en-US. Arabic is kept because the user reads it.
+LOCALES = en-US ar
+
+all: $(ELECTRON)/electron
+	@echo "  nothing to build -- run 'make install' or 'npm start'"
+
+$(ELECTRON)/electron:
+	npm install --no-audit --no-fund
+
+# What the app itself is: everything the runtime reads, and nothing else.
+APP_FILES = package.json src data
+
+install: $(ELECTRON)/electron install-assets
+	@install -d $(DESTDIR)$(libdir)
+	@cp -a $(ELECTRON)/. $(DESTDIR)$(libdir)/
+	@rm -f $(DESTDIR)$(libdir)/electron
+	@# Removed rather than written over: install(1) writes through an existing
+	@# file, and the binary being replaced is the one a running copy of the app
+	@# is executing from. Unlinking it first leaves that copy with its own inode
+	@# and gives the new one a fresh file, which is the difference between an
+	@# upgrade over a running client working and it dying with a bus error.
+	@rm -f $(DESTDIR)$(libdir)/$(BIN)
+	@install -m755 $(ELECTRON)/electron $(DESTDIR)$(libdir)/$(BIN)
+	@for f in $(DESTDIR)$(libdir)/locales/*.pak; do \
+	  keep=""; for l in $(LOCALES); do [ "$$(basename $$f .pak)" = "$$l" ] && keep=1; done; \
+	  [ -n "$$keep" ] || rm -f "$$f"; \
+	done
+	@# Cleared first, so a file that has been deleted from the source tree --
+	@# a module that was split up, a page that was renamed -- does not survive
+	@# in an installed tree as a stale copy that still gets required.
+	@rm -rf $(DESTDIR)$(libdir)/resources/app
+	@install -d $(DESTDIR)$(libdir)/resources/app
+	@cp -a $(APP_FILES) $(DESTDIR)$(libdir)/resources/app/
+	@# Chromium's sandbox uses unprivileged user namespaces where they are
+	@# allowed, and falls back to this setuid helper where they are not --
+	@# Ubuntu confines the first behind AppArmor, so there it is the helper or
+	@# no start at all. Electron ships it 0755, so the bit is set here, on the
+	@# staged tree too: the package records the mode, and every install and
+	@# every upgrade lays it down again. Root ownership is the packaging's
+	@# (dpkg-deb --root-owner-group, rpmbuild, makepkg under fakeroot); a local
+	@# install has only the user's, which Chromium rejects -- and does not need,
+	@# since a system that allows namespaces never looks at the helper.
+	@chmod 4755 $(DESTDIR)$(libdir)/chrome-sandbox 2>/dev/null || true
+	@install -d $(DESTDIR)$(bindir)
+	@printf '#!/bin/sh\n'                                                     >  $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# A terminal inside VS Code exports ELECTRON_RUN_AS_NODE=1, and\n' >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# an Electron that inherits it starts as plain node instead.\n'   >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf 'unset ELECTRON_RUN_AS_NODE\n'                                    >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '\n'                                                              >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# The desktop font is imposed through fontconfig, and fontconfig is\n' >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# read once, early -- before any of the app%ss own code runs. So the\n' "'" >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# variable has to be in the environment the binary is executed with.\n'   >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# The file itself is written by the app; the first ever launch has\n'     >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '# none, notices, and restarts itself once.\n'                    >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf 'wa_fonts="$${XDG_DATA_HOME:-$$HOME/.local/share}/whatsapp-desktop/fonts.conf"\n' >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '[ -f "$$wa_fonts" ] && export FONTCONFIG_FILE="$$wa_fonts"\n'    >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf '\n'                                                              >> $(DESTDIR)$(bindir)/$(BIN)
+	@printf 'exec %s/%s "$$@"\n' "$(libdir)" "$(BIN)"                         >> $(DESTDIR)$(bindir)/$(BIN)
+	@chmod 755 $(DESTDIR)$(bindir)/$(BIN)
+	@echo "  INSTALL  $(DESTDIR)$(bindir)/$(BIN)  ($$(du -sh $(DESTDIR)$(libdir) | cut -f1))"
+
+# Distribution packages contain only our application source. The distribution
+# owns Electron, its sandbox, libraries, translations and security updates.
+# This target has no dependency on npm or a downloaded Electron executable.
+install-system: install-assets
+	@install -d $(DESTDIR)$(systemappdir)
+	@cp -a $(APP_FILES) $(DESTDIR)$(systemappdir)/
+	@install -d $(DESTDIR)$(bindir)
+	@sed -e 's|@ELECTRON_BIN@|$(SYSTEM_ELECTRON)|g' \
+	      -e 's|@APPDIR@|$(systemappdir)|g' \
+	      -e 's|@VERSION@|$(VERSION)|g' \
+	      packaging/official/whatsapp-desktop.in > $(DESTDIR)$(bindir)/$(BIN)
+	@chmod 755 $(DESTDIR)$(bindir)/$(BIN)
+	@install -Dm644 data/$(APP_ID).metainfo.xml \
+	      $(DESTDIR)$(PREFIX)/share/metainfo/$(APP_ID).metainfo.xml
+	@install -Dm644 packaging/official/whatsapp-desktop.1 \
+	      $(DESTDIR)$(PREFIX)/share/man/man1/$(BIN).1
+	@echo "  INSTALL  source application using $(SYSTEM_ELECTRON)"
+
+install-assets:
+	@# Tray icons land in both contexts: SNI hosts disagree on which they search.
+	@for s in $(ICON_SIZES); do \
+	  for f in apps/$(APP_ID).png apps/$(APP_ID)-tray.png \
+	           apps/whatsapp-desktop.png apps/whatsapp-desktop-tray.png \
+	           apps/WhatsApp.png \
+	           status/$(APP_ID)-tray.png status/$(APP_ID)-tray-attention.png \
+	           status/whatsapp-desktop-tray.png status/whatsapp-desktop-tray-attention.png; do \
+	    install -Dm644 data/icons/$$s/$$f $(DESTDIR)$(icontheme)/$${s}x$${s}/$$f; \
+	  done; \
+	done
+	@install -d $(DESTDIR)$(appdir)
+	@sed 's|@BINDIR@|$(bindir)|g' data/$(APP_ID).desktop > $(DESTDIR)$(appdir)/$(APP_ID).desktop
+	@chmod 644 $(DESTDIR)$(appdir)/$(APP_ID).desktop
+	@# Skipped when staging for a package; packaging scripts run them.
+	@test -n "$(DESTDIR)" || update-desktop-database $(appdir) 2>/dev/null || true
+	@test -n "$(DESTDIR)" || gtk-update-icon-cache -qtf $(icontheme) 2>/dev/null || true
+
+# Start hidden at login: connected and in the tray, no window on screen.
+autostart: install
+	@install -d $(autostartdir)
+	@sed 's|@BINDIR@|$(bindir)|g' data/$(APP_ID)-autostart.desktop > $(autostartdir)/$(APP_ID).desktop
+	@chmod 644 $(autostartdir)/$(APP_ID).desktop
+	@echo "  AUTOSTART  $(autostartdir)/$(APP_ID).desktop"
+
+no-autostart:
+	rm -f $(autostartdir)/$(APP_ID).desktop
+
+uninstall: no-autostart
+	rm -rf $(DESTDIR)$(libdir)
+	rm -f $(DESTDIR)$(bindir)/$(BIN) $(DESTDIR)$(appdir)/$(APP_ID).desktop
+	@for s in $(ICON_SIZES); do \
+	  rm -f $(DESTDIR)$(icontheme)/$${s}x$${s}/apps/$(APP_ID).png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/apps/$(APP_ID)-tray.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/apps/whatsapp-desktop.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/apps/whatsapp-desktop-tray.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/apps/WhatsApp.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/status/$(APP_ID)-tray.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/status/$(APP_ID)-tray-attention.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/status/whatsapp-desktop-tray.png \
+	        $(DESTDIR)$(icontheme)/$${s}x$${s}/status/whatsapp-desktop-tray-attention.png; \
+	done
+
+icons:
+	python3 tools/make-icons.py
+
+# The link-preview card the landing page advertises. Committed under docs/, so
+# run this only when the wording or the launcher icon changes.
+og:
+	python3 tools/make-og.py
+
+# The pictures of the client's own windows, for the README and the site. Real
+# windows with their real preloads, grown to their full content -- so run this
+# whenever one of them gains or loses a row, and commit what comes out. The site
+# reads the same files: docs/ is served from main, and nothing fetches them from
+# elsewhere.
+SHOTS = settings fonts about
+screenshots:
+	@env -u ELECTRON_RUN_AS_NODE npx electron tools/capture-windows.js
+	@for s in $(SHOTS); do cp screenshots/$$s.png docs/assets/$$s.png; done
+	@echo "  SHOTS  screenshots/ and docs/assets/"
+
+# Replays page, notification and desktop behavior in plain node -- no browser,
+# account or live desktop session.
+test:
+	@node tools/test-relaunch.js
+	@node tools/test-connection.js
+	@node tools/test-inject.js
+	@node tools/test-navigation.js
+	@node tools/test-motion.js
+	@node tools/test-wallpaper.js
+	@node tools/test-bidi.js
+	@node tools/test-wording.js
+	@node tools/test-style.js
+	@node tools/test-themes.js
+	@node tools/test-fonts.js
+	@node tools/test-settings.js
+	@node tools/test-links.js
+	@node tools/test-tray.js
+	@node tools/test-window.js
+	@node tools/test-display.js
+	@node tools/test-mpris.js
+	@node tools/test-config.js
+	@node tools/test-privacy.js
+	@node tools/test-lock.js
+	@node tools/test-update.js
+
+run:
+	@env -u ELECTRON_RUN_AS_NODE npm start
+
+package-deb:
+	packaging/build-deb.sh
+
+package-rpm:
+	packaging/build-rpm.sh
+
+package-arch:
+	@mkdir -p dist
+	@cp packaging/PKGBUILD dist/PKGBUILD
+	@sed -i 's/^pkgver=.*/pkgver=$(VERSION)/' dist/PKGBUILD
+	@cd dist && makepkg --clean --cleanbuild --syncdeps --noconfirm
+	@rm -f dist/PKGBUILD
+
+# A single file that runs on a distribution this project has no package for.
+# It carries its own copy of Electron, so it is large; that is the trade.
+package-appimage:
+	@packaging/build-appimage.sh
+
+# Not built here: flatpak-builder wants a runtime and an SDK installed, which is
+# a gigabyte of download the other targets do not need. The manifest is kept
+# with them so it stays in step with what `make install` lays down -- it builds
+# through that same target.
+package-flatpak:
+	@echo "  flatpak-builder --force-clean build-dir packaging/$(APP_ID).yml"
+
+package-source:
+	@mkdir -p dist
+	@git archive --format=tar.gz --prefix=whatsapp-desktop-$(VERSION)/ -o dist/whatsapp-desktop-$(VERSION)-source.tar.gz HEAD
+	@sha256sum dist/* > dist/SHA256SUMS
+	@echo "  SOURCE  dist/whatsapp-desktop-$(VERSION)-source.tar.gz"
+
+package: package-deb package-rpm package-arch package-appimage package-source
+
+clean:
+	rm -rf node_modules
+
+.PHONY: all install install-system install-assets autostart no-autostart uninstall icons og screenshots test run package-deb package-rpm package-arch package-appimage package-flatpak package-source package clean

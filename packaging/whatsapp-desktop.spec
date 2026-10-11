@@ -1,0 +1,127 @@
+# This package ships a prebuilt tree -- a copy of Electron -- rather than
+# sources, so three of rpm's automatic passes have to be switched off.
+#
+# Debuginfo extraction has nothing to work from and fails the build outright on
+# the Electron binary: "GDB exited with exit status 1 during index generation".
+%global debug_package %{nil}
+# And the rest of the post-install brp scripts must not strip or rewrite a
+# 194 MB Chromium binary that was shipped ready to run.
+%global __os_install_post %{nil}
+
+# The bundled Chromium libraries live in a private directory and are nobody
+# else's to depend on: without the first line this package would advertise
+# Provides: libvulkan.so.1 and libEGL.so to the whole system, and dnf could
+# satisfy another package's dependency with a copy meant only for this app. The
+# second line is the other half -- the electron binary genuinely does require
+# those SONAMEs, and once they stop being provided the package cannot install
+# itself.
+%global __provides_exclude_from ^%{_prefix}/lib/whatsapp-desktop/.*$
+%global __requires_exclude ^(libffmpeg|libEGL|libGLESv2|libvk_swiftshader|libvulkan)\.so.*$
+
+Name:           whatsapp-desktop
+Version:        %{?version}%{!?version:1.9.13}
+Release:        %{?release}%{!?release:1}%{?dist}
+Summary:        WhatsApp Web desktop client for Linux
+License:        GPL-3.0-or-later
+URL:            https://github.com/seotarek/whatsapp-desktop
+Source0:        %{name}-%{version}.tar.gz
+
+Requires:       alsa-lib
+Requires:       atk
+Requires:       at-spi2-atk
+Requires:       cairo
+Requires:       cups-libs
+# The session bus itself, not the library: the tray does not link libdbus at all.
+# It writes the protocol onto the socket in $DBUS_SESSION_BUS_ADDRESS (see
+# src/dbus.js), because owning the menu is the only way to keep its item ids
+# still, and a client that borrows a menu cannot. Without a bus running there is
+# no tray at all -- so the daemon is named here, where dbus-libs below only ever
+# covered Chromium's own linkage.
+Requires:       dbus
+Requires:       dbus-libs
+# gdbus, which is how the Electron tray -- the fallback, for a session this
+# client cannot reach the bus of -- asks whether a status icon host is listening.
+# gtk3 already pulls it in; it is named here because the tray, not the toolkit,
+# is what stops working without it.
+Requires:       glib2
+Requires:       gtk3
+Requires:       libX11
+Requires:       libXcomposite
+Requires:       libXdamage
+Requires:       libXext
+Requires:       libXfixes
+Requires:       libXrandr
+Requires:       libdrm
+Requires:       mesa-libgbm
+Requires:       nspr
+Requires:       nss
+Requires:       pango
+Requires:       zlib
+
+%description
+WhatsApp Web in a dedicated Chromium window with a system tray, desktop
+notifications, desktop font integration, and Arabic text fixes.
+
+%prep
+%setup -q
+
+%build
+# Electron is downloaded and installed by the packaging helper before rpmbuild.
+:
+
+%install
+# One source of truth for what "installed" means: the Makefile. It renames the
+# Electron binary (the name becomes the Wayland app_id, and so the icon and the
+# name in the switcher), drops the 53 Chromium translations of a user interface
+# this app never shows, and writes the launcher -- which has to export
+# FONTCONFIG_FILE, because fontconfig is read before any of the app's own code
+# runs and that is how the desktop font is imposed without a stylesheet.
+make install DESTDIR=%{buildroot} PREFIX=/usr
+
+# Autostart is shipped system-wide rather than written into a home directory, so
+# the package can cleanly remove it again. It starts hidden, in the tray.
+install -Dm644 data/io.github.seotarek.whatsapp-desktop-autostart.desktop \
+  %{buildroot}/etc/xdg/autostart/io.github.seotarek.whatsapp-desktop.desktop
+sed -i 's|@BINDIR@|/usr/bin|g' %{buildroot}/etc/xdg/autostart/io.github.seotarek.whatsapp-desktop.desktop
+
+install -D -m 0644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
+install -D -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
+
+# The icon theme keeps a compiled cache, and a launcher icon replaced under a
+# directory that already has one goes on being drawn from the cache until it is
+# rebuilt. That is the whole of "I updated and the icon did not change" -- so it
+# is rebuilt here, on install and on update alike, and again after a removal so
+# the entry does not linger. The tray icon is not affected either way: the app
+# loads that one straight off disk by path, never through the theme.
+%post
+/usr/bin/gtk-update-icon-cache -qtf /usr/share/icons/hicolor &>/dev/null || :
+/usr/bin/update-desktop-database -q /usr/share/applications &>/dev/null || :
+
+%postun
+if [ $1 -eq 0 ]; then
+  /usr/bin/gtk-update-icon-cache -qtf /usr/share/icons/hicolor &>/dev/null || :
+  /usr/bin/update-desktop-database -q /usr/share/applications &>/dev/null || :
+fi
+
+%files
+/usr/bin/%{name}
+/usr/lib/%{name}
+/etc/xdg/autostart/io.github.seotarek.whatsapp-desktop.desktop
+/usr/share/applications/io.github.seotarek.whatsapp-desktop.desktop
+/usr/share/icons/hicolor/*/apps/io.github.seotarek.whatsapp-desktop.png
+/usr/share/icons/hicolor/*/apps/whatsapp-desktop.png
+/usr/share/icons/hicolor/*/apps/WhatsApp.png
+# The tray icon is installed into both contexts on purpose: SNI hosts disagree
+# on which of them they search.
+/usr/share/icons/hicolor/*/apps/io.github.seotarek.whatsapp-desktop-tray.png
+/usr/share/icons/hicolor/*/apps/whatsapp-desktop-tray.png
+/usr/share/icons/hicolor/*/status/io.github.seotarek.whatsapp-desktop-tray.png
+/usr/share/icons/hicolor/*/status/whatsapp-desktop-tray.png
+/usr/share/icons/hicolor/*/status/io.github.seotarek.whatsapp-desktop-tray-attention.png
+/usr/share/icons/hicolor/*/status/whatsapp-desktop-tray-attention.png
+%license %{_licensedir}/%{name}/LICENSE
+%doc %{_docdir}/%{name}/README.md
+
+%changelog
+* Thu Aug 27 2026 Tarek (seotarek) <seotarek@gmail.com> - 0.1.0-1
+- Initial package.

@@ -1,0 +1,23 @@
+{
+  "name": "whatsapp-desktop",
+  "productName": "WhatsApp",
+  "version": "1.9.13",
+  "description": "WhatsApp Web desktop client for Linux with tray integration, notifications, Arabic text fixes, and a privacy shield",
+  "license": "GPL-3.0-or-later",
+  "author": "Tarek (seotarek) <seotarek@gmail.com>",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^40.0.0"
+  },
+  "homepage": "https://github.com/seotarek/whatsapp-desktop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seotarek/whatsapp-desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/seotarek/whatsapp-desktop/issues"
+  }
+}

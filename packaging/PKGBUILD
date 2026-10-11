@@ -1,0 +1,44 @@
+# Maintainer: Tarek (seotarek) <seotarek@gmail.com>
+pkgname=whatsapp-desktop
+pkgver=1.9.13
+pkgrel=1
+pkgdesc='WhatsApp Web desktop client for Linux with tray integration and Arabic text fixes'
+arch=('x86_64')
+url='https://github.com/seotarek/whatsapp-desktop'
+license=('GPL-3.0-or-later')
+# 'dbus' here is the session bus the tray speaks to directly (src/dbus.js), not
+# a library it links: with no bus running there is no tray icon at all.
+depends=('alsa-lib' 'at-spi2-core' 'cairo' 'cups' 'dbus' 'glib2' 'gtk3' 'libdrm' 'libx11' 'libxcomposite' 'libxdamage' 'libxext' 'libxfixes' 'libxrandr' 'mesa' 'nspr' 'nss' 'pango' 'zlib')
+makedepends=('git' 'npm' 'make')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/seotarek/whatsapp-desktop/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  npm ci --no-audit --no-fund
+  # Arch's npm policy blocks dependency lifecycle scripts; run Electron's
+  # official installer explicitly so node_modules/electron/dist is present.
+  node node_modules/electron/install.js
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  # One source of truth for what "installed" means: the Makefile. It renames the
+  # Electron binary -- the name becomes the Wayland app_id, and so the icon and
+  # the name in the switcher -- drops the 53 Chromium translations of a user
+  # interface this app never shows, and writes the launcher, which has to export
+  # FONTCONFIG_FILE because fontconfig is read before any of the app's own code
+  # runs and that is how the desktop font is imposed without a stylesheet.
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+
+  # Autostart is shipped system-wide rather than written into a home directory,
+  # so the package can cleanly remove it again. It starts hidden, in the tray.
+  sed 's|@BINDIR@|/usr/bin|g' data/io.github.seotarek.whatsapp-desktop-autostart.desktop \
+    > "$srcdir/autostart.desktop"
+  install -Dm644 "$srcdir/autostart.desktop" \
+    "$pkgdir/etc/xdg/autostart/io.github.seotarek.whatsapp-desktop.desktop"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

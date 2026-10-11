@@ -1,0 +1,400 @@
+/*
+ * The config file, kept in the same INI shape the GTK client used so the keys
+ * are familiar and can be edited by hand. Everything in it is optional.
+ *
+ *   ~/.config/whatsapp-desktop/whatsapp-desktop.conf
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+                             'whatsapp-desktop');
+const CONFIG_PATH = path.join(CONFIG_DIR, 'whatsapp-desktop.conf');
+/* A stylesheet of the owner's own, next to the config file so there is one
+   directory to know about. Read last, so it can contradict everything the
+   client draws -- see styleSheet in src/main.js. */
+const CUSTOM_CSS_PATH = path.join(CONFIG_DIR, 'custom.css');
+
+const DEFAULTS = {
+  /* 'system' follows the desktop, 'dark' and 'light' force one of WhatsApp's
+     own two. Anything else is a palette from src/themes.js -- oled, nord,
+     catppuccin, dracula, tokyonight -- which repaints the page through
+     WhatsApp's own custom properties. A palette still picks dark or light
+     underneath it for the client's own windows. */
+  'view.theme': 'system',
+  /* Take the accent colour from pywal/wallust (~/.cache/wal/colors.json) or
+     from Hyprland's colors.conf, so a desktop themed from its wallpaper does
+     not leave this one window behind. Only the accent: a generated palette is
+     reliable about that and not about whether its background has the contrast
+     to read a message on. */
+  'view.follow-desktop-accent': true,
+  'view.font': '',                 // empty: follow the desktop font
+  'view.font-size': 16,            // WhatsApp sizes in rem, so this scales the client
+  'view.zoom': 1.0,
+  'view.force-font': true,         // draw the page in one family, like a browser told to ignore page fonts
+  /* Read ~/.config/whatsapp-desktop/custom.css into the page, last, so it wins
+     over everything else the client draws. Off by default: a stylesheet that
+     can hide any element in WhatsApp is a good way to lose a button and not
+     know why, and it should be a thing somebody turned on. Saving the file
+     redraws the page -- see watchCustomCss in src/main.js. */
+  'view.custom-css': false,
+  'view.chat-cards': false,        // draw each chat in the list as a raised card
+  /* A font per script, and a switch per script to say whether the desktop's own
+     is being followed. Two switches and not one, because the two questions are
+     genuinely separate: an owner who wants a different Arabic face has no
+     reason to have to pick a Latin one as well, and one who has picked a Latin
+     one should not have to leave Arabic to it. While a script's switch is on,
+     the four keys under it are ignored -- so a choice made once is still there
+     to come back to, and there is nothing to type in again.
+
+     Nothing here can invent a face a font does not ship: `bold` on a family
+     with no bold face changes nothing, which is why the settings window offers
+     that switch only where there is one. */
+  'fonts.latin-inherit': true,
+  'fonts.latin-family': '',        // empty: the desktop font, as before
+  'fonts.latin-size': 100,         // per cent of the family's own size
+  'fonts.latin-bold': false,
+  'fonts.latin-italic': false,
+  'fonts.arabic-inherit': true,
+  'fonts.arabic-family': '',       // empty: whatever the system draws Arabic in
+  'fonts.arabic-size': 100,
+  'fonts.arabic-bold': false,
+  'fonts.arabic-italic': false,
+  'window.width': 1200,
+  'window.height': 800,
+  'behaviour.close-to-tray': true,
+  'behaviour.minimize-to-tray': false,
+  'behaviour.spellcheck': true,
+  /* Which languages the composer is checked in, comma separated, in Chromium's
+     own naming -- en-US, en-GB, fr, de. Only the ones Chromium actually ships a
+     dictionary for can be asked for; anything else is dropped with a line
+     saying so, rather than taken as a reason to check nothing at all. Arabic is
+     not among them, which is why it is not the default here. */
+  'behaviour.spellcheck-languages': 'en-US',
+  /* How the window is brought to the user, which is not the same question on
+     every desktop: 'remap' takes it down and opens it again, 'activate' simply
+     asks for it. 'auto' seeds one of those from the session and corrects it
+     from what the window actually did -- see showWindow in src/main.js. This
+     is here for the desktop where the measurement is wrong, and nothing in the
+     client ever writes it. */
+  'behaviour.raise': 'auto',
+  /* Put a media card on the desktop while a voice note is playing, so the
+     headset button and the lock screen reach the note rather than whatever
+     music player is also registered. Turn it off to leave the media keys with
+     whatever had them before -- see src/mpris.js. */
+  'behaviour.mpris': true,
+  /* Keys the desktop catches for this client wherever the focus is -- the point
+     being to reach a window that is behind something else, or in the tray. Only
+     two, and both chosen to be ones nothing else is likely to want: `toggle`
+     shows the window or puts it away, and `mute` is the microphone in a call,
+     which is the one thing worth reaching without finding the window first.
+
+     A combination the desktop has already given to something else cannot be
+     registered twice; the client says so on startup and carries on. Written in
+     Electron's own accelerator spelling -- Super, Control, Alt, Shift. Set
+     either to an empty value to leave that key alone. */
+  'shortcuts.global': true,
+  'shortcuts.toggle': 'Super+Alt+W',
+  'shortcuts.mute-call': 'Super+Alt+M',
+  /* Blur the conversation against a glance over your shoulder -- Ctrl+Alt+P,
+     and see src/privacy.js. `stealth` is the switch that press holds, kept
+     across a restart; `auto-blur` is the one that catches the window being left
+     in the background. `hover-reveal` is what makes leaving it on bearable --
+     the line under the pointer reads, the rest does not. `blur-contacts` takes
+     the chat list and the header with it, which is the half a screenshot or a
+     shared screen gives away without a conversation being open at all. */
+  'privacy.stealth': false,
+  'privacy.auto-blur': false,
+  'privacy.hover-reveal': true,
+  'privacy.blur-contacts': true,
+  /* A passcode over the window -- see src/lock.js. `enabled` is written by the
+     client when a passcode is set or cleared and means nothing on its own:
+     without a passcode in security.json there is nothing to check, and the
+     lock stays off. `timeout` is minutes of no window activity before it locks
+     itself, 0 to never. `on-system-lock` follows the desktop's own lock and
+     suspend, which is the moment somebody walks away from the machine.
+
+     This covers the screen and the notifications, nothing else. The session on
+     disk is not encrypted and anyone with the machine can read it; what the
+     passcode buys is that the chats are not on display and a banner does not
+     read them out while the window is covered. */
+  'lock.enabled': false,
+  'lock.timeout': 15,
+  'lock.on-system-lock': true,
+  'notifications.enabled': true,
+  'notifications.sound': true,     // a tone for the banners this client raises itself
+  'notifications.outgoing-sound': false,  // WhatsApp's own tone for a message you send
+  'notifications.whatsapp-sound': false,  // let WhatsApp play its own tone for a message arriving
+  'notifications.banner-seconds': 12,
+  'notifications.hide-preview': false,    // the chat and the kind of message, never the words
+  /* WhatsApp Web files a sticker under "photos" for auto-download purposes, so
+     turning photos off takes the stickers with it and leaves nothing in their
+     place -- not even a button to fetch one. The phone has no sticker switch at
+     all and always fetches them. This does the same; turn it off to have
+     WhatsApp's photo switch govern stickers again. */
+  'media.download-stickers': true,
+  /* Take the desktop's media card down when a voice note is paused, instead of
+     leaving it there until the note has played out. */
+  'media.hide-controls-when-paused': true,
+  /* Ask where every download goes, instead of dropping it in ~/Downloads and
+     saying nothing. Turn it off to have files land there again. */
+  'media.ask-where-to-save': true,
+  /* Where the last one went, so the chooser opens on the folder it was pointed
+     at last rather than at the same place every time. Written by the client;
+     there is nothing to gain by editing it by hand. */
+  'media.download-dir': '',
+  /* Ask the desktop to open whatsapp: links with this client rather than in a
+     browser tab -- what "Open app" on api.whatsapp.com hands over. Turn it off
+     to leave the scheme with whatever already holds it; see src/links.js. */
+  'links.claim-scheme': true,
+  /* Ask GitHub once a day whether a newer version has been released, and put it
+     on the tray's own menu item if one has. Nothing is downloaded and nothing is
+     installed -- the package manager does that -- and nothing pops up. Turn it
+     off and nothing asks by itself; About's own Check button still does. */
+  /* Two escape hatches for the machine where the defaults above are the wrong
+     ones, reachable without rebuilding anything. force-x11 goes through
+     XWayland, for the compositor where a screen share comes out black or the
+     window will not come up; hardware-acceleration off draws in software, for
+     the driver where overriding the GPU blocklist is what hangs the session.
+     Both cost the smoothness this client goes to some trouble over, so neither
+     is a thing to turn on while something else still works. A restart is
+     needed either way: Chromium reads both before any of this code runs. */
+  'system.force-x11': false,
+  'system.hardware-acceleration': true,
+  'updates.check': true,
+};
+
+/* A deliberately small INI reader: sections, key = value, # and ; comments.
+   Nothing here is worth a dependency, and a parser that silently accepts a
+   half-written file is what a hand-edited config needs. */
+const parse = text => {
+  const out = {};
+  let section = '';
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line[0] === '#' || line[0] === ';') continue;
+    const header = /^\[(.+)\]$/.exec(line);
+    if (header) { section = header[1].trim(); continue; }
+    const eq = line.indexOf('=');
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    out[(section ? section + '.' : '') + key] = value;
+  }
+  return out;
+};
+
+const coerce = (value, fallback) => {
+  if (typeof fallback === 'boolean') return /^(1|true|yes|on)$/i.test(value);
+  if (typeof fallback === 'number') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  return value;
+};
+
+class Config {
+  constructor() {
+    this.values = { ...DEFAULTS };
+    this.reload();
+  }
+
+  reload() {
+    let text = '';
+    try { text = fs.readFileSync(CONFIG_PATH, 'utf8'); } catch (e) { return; }
+    const raw = parse(text);
+    for (const [key, fallback] of Object.entries(DEFAULTS)) {
+      if (raw[key] !== undefined) this.values[key] = coerce(raw[key], fallback);
+    }
+  }
+
+  get(key) { return this.values[key]; }
+
+  set(key, value) { this.values[key] = value; }
+
+  /* Only what the client itself decides is written back -- the window size and
+     the zoom level. A hand-written config keeps its comments and its layout,
+     because the file is rewritten from the values it already held plus these. */
+  save() {
+    const v = this.values;
+    const text = [
+      '# whatsapp-desktop -- every key is optional; delete one to get the default back.',
+      '',
+      '[view]',
+      '# system follows the desktop; dark and light force one of WhatsApp\'s own',
+      '# two. Anything else is a palette: oled, nord, catppuccin, dracula,',
+      '# tokyonight -- which repaints the page through its own custom properties.',
+      `theme = ${v['view.theme'] || 'system'}`,
+      '# Take the accent colour from pywal/wallust or Hyprland, so a desktop',
+      '# themed from its wallpaper does not leave this one window behind.',
+      `follow-desktop-accent = ${v['view.follow-desktop-accent']}`,
+      '# Family for everything the client draws. Empty follows the desktop font.',
+      `font = ${v['view.font']}`,
+      '# Root font size in pixels. WhatsApp sizes in rem, so this scales the client.',
+      `font-size = ${v['view.font-size']}`,
+      `zoom = ${Number(v['view.zoom']).toFixed(2)}`,
+      '# Draw the whole page in one family, the way a browser told to ignore page fonts does.',
+      `force-font = ${v['view.force-font']}`,
+      '# Read custom.css, in this directory, into the page -- last, so it wins',
+      '# over everything the client draws. Saving that file redraws the page.',
+      `custom-css = ${v['view.custom-css']}`,
+      '# Draw each chat in the list as a card of its own, raised off the panel',
+      '# behind it, rather than as a row running the full width of it.',
+      `chat-cards = ${v['view.chat-cards']}`,
+      '',
+      '[fonts]',
+      '# One switch per script. On: that script is drawn in the desktop font,',
+      '# exactly as this client always drew it, and the keys under it are',
+      "# ignored -- so a choice is still here to come back to. Off: it is drawn",
+      '# in what was chosen for it. The two are separate on purpose: an Arabic',
+      '# face of your own does not oblige you to pick a Latin one.',
+      `latin-inherit = ${v['fonts.latin-inherit']}`,
+      '# The family for Latin text. Empty follows the desktop font.',
+      `latin-family = ${v['fonts.latin-family']}`,
+      '# Its size, as a percentage of the size that family is drawn at.',
+      `latin-size = ${Math.round(Number(v['fonts.latin-size']) || 100)}`,
+      "# Draw Latin in the family's own bold or italic face. A family that ships",
+      '# neither cannot be made to have one: nothing is synthesised here.',
+      `latin-bold = ${v['fonts.latin-bold']}`,
+      `latin-italic = ${v['fonts.latin-italic']}`,
+      '# And the same for Arabic. Empty family: whatever the system already draws',
+      '# Arabic in, which is what a size on its own needs to hang on.',
+      `arabic-inherit = ${v['fonts.arabic-inherit']}`,
+      `arabic-family = ${v['fonts.arabic-family']}`,
+      `arabic-size = ${Math.round(Number(v['fonts.arabic-size']) || 100)}`,
+      `arabic-bold = ${v['fonts.arabic-bold']}`,
+      `arabic-italic = ${v['fonts.arabic-italic']}`,
+      '',
+      '[window]',
+      `width = ${Math.round(v['window.width'])}`,
+      `height = ${Math.round(v['window.height'])}`,
+      '',
+      '[behaviour]',
+      '# Closing the window leaves the client running in the tray.',
+      `close-to-tray = ${v['behaviour.close-to-tray']}`,
+      '# Minimising does the same. Off by default: minimise is not close.',
+      `minimize-to-tray = ${v['behaviour.minimize-to-tray']}`,
+      `spellcheck = ${v['behaviour.spellcheck']}`,
+      '# Which languages to check in, comma separated, in Chromium\'s own naming.',
+      '# Only ones it ships a dictionary for; the rest are dropped with a line',
+      '# saying so. Arabic is not among them.',
+      `spellcheck-languages = ${v['behaviour.spellcheck-languages']}`,
+      '# A media card on the desktop while a voice note plays, so the headset',
+      '# button reaches the note and not whatever music player is registered.',
+      `mpris = ${v['behaviour.mpris']}`,
+      '# How the window is brought to the front when a banner is clicked, a link',
+      '# is followed, or the tray is asked. auto: worked out from the session and',
+      '# corrected once from what the window actually did. activate: ask the',
+      '# compositor for it, which X11 always honours. remap: take the window down',
+      '# and open it again, which is the only way up on some Wayland compositors.',
+      `raise = ${v['behaviour.raise'] || 'auto'}`,
+      '',
+      '[shortcuts]',
+      '# Keys the desktop catches wherever the focus is, so they reach a window',
+      '# that is behind something else or in the tray. A combination the desktop',
+      '# has already given away cannot be taken twice; the client says so on',
+      '# startup and carries on. Empty value: leave that key alone.',
+      `global = ${v['shortcuts.global']}`,
+      `toggle = ${v['shortcuts.toggle']}`,
+      `mute-call = ${v['shortcuts.mute-call']}`,
+      '',
+      '[privacy]',
+      '# Ctrl+Alt+P covers the conversation against a glance over your shoulder.',
+      '# stealth is what that key holds, kept across a restart; auto-blur is the',
+      '# one that catches the window being left in the background.',
+      `stealth = ${v['privacy.stealth']}`,
+      `auto-blur = ${v['privacy.auto-blur']}`,
+      '# While it is covered, the line under the pointer stays readable, which is',
+      '# what makes leaving it on bearable.',
+      `hover-reveal = ${v['privacy.hover-reveal']}`,
+      '# Take the chat list and the header with it, not just the messages.',
+      `blur-contacts = ${v['privacy.blur-contacts']}`,
+      '',
+      '[lock]',
+      '# A passcode over the window. enabled is written by the client when one is',
+      '# set or cleared and means nothing without a passcode in security.json.',
+      '# It covers the screen and stops banners carrying the message; it does not',
+      '# encrypt the session, and anyone with the machine can read it.',
+      `enabled = ${v['lock.enabled']}`,
+      '# Minutes of a quiet window before it locks itself. 0 to never.',
+      `timeout = ${Math.round(Number(v['lock.timeout']) || 0)}`,
+      "# Lock with the desktop's own lock and on suspend, which is the moment",
+      '# somebody actually walks away.',
+      `on-system-lock = ${v['lock.on-system-lock']}`,
+      '',
+      '[notifications]',
+      `enabled = ${v['notifications.enabled']}`,
+      '# A tone for the banners this client raises itself. WhatsApp plays its own',
+      '# for the ones it raises, and two sounds for one message is worse than none.',
+      `sound = ${v['notifications.sound']}`,
+      '# WhatsApp plays a tone of its own when a message of yours goes out. Off',
+      '# here: the message is already on screen, with a tick under it, in the',
+      '# window you are looking at.',
+      `outgoing-sound = ${v['notifications.outgoing-sound']}`,
+      '# WhatsApp also plays one for a message arriving while the window is away,',
+      '# and that is the only moment it announces anything itself. Off here, so',
+      '# that a message sounds the same whether the window is in front or in the',
+      '# tray: the client plays the desktop tone for both. Turn it on to hear',
+      "# WhatsApp's own tone instead -- and then the window in front stays silent,",
+      '# because that is the half WhatsApp does not announce.',
+      `whatsapp-sound = ${v['notifications.whatsapp-sound']}`,
+      '# Seconds before a banner is taken down and filed silently. GNOME parks a',
+      '# banner under an idle pointer for ever, and one parked banner swallows',
+      '# every message behind it.',
+      `banner-seconds = ${v['notifications.banner-seconds']}`,
+      '# Keep the message itself off the screen: a banner then says which chat it',
+      '# came from and what kind of thing arrived, and nothing of what was said.',
+      `hide-preview = ${v['notifications.hide-preview']}`,
+      '',
+      '[media]',
+      '# WhatsApp counts a sticker as a photo for auto-download, so turning photos',
+      '# off leaves every sticker as a blank space with no way to fetch it. The',
+      '# phone always fetches stickers; so does this, unless it is turned off here.',
+      `download-stickers = ${v['media.download-stickers']}`,
+      "# A voice note that is only paused leaves its card in the desktop's",
+      '# notification centre until the note has played out -- Chromium keeps the',
+      '# media session for a paused player, and the shell shows every session it',
+      '# can see. On, the card goes down with the pause and comes back when the',
+      '# note does. Turn it off to keep a paused note on the shell, where its',
+      '# play button can start it again.',
+      `hide-controls-when-paused = ${v['media.hide-controls-when-paused']}`,
+      '# Every download asks where to put it. Off, and they land in ~/Downloads',
+      '# the way a phone does it, with a number on the end of a name already taken.',
+      `ask-where-to-save = ${v['media.ask-where-to-save']}`,
+      '# The folder the last download was pointed at, so the chooser opens there.',
+      `download-dir = ${v['media.download-dir'] || ''}`,
+      '',
+      /* These two were read but never written, so turning either off by hand
+         held only until the next save -- and a window resize is a save. */
+      '[links]',
+      '# Open whatsapp: links in this client rather than in a browser tab.',
+      `claim-scheme = ${v['links.claim-scheme']}`,
+      '',
+      '[system]',
+      '# Go through XWayland instead of native Wayland, for the compositor where',
+      '# a screen share comes out black or the window will not come up.',
+      `force-x11 = ${v['system.force-x11']}`,
+      '# Off draws in software, for the driver where overriding the GPU',
+      '# blocklist hangs the session. Both need a restart.',
+      `hardware-acceleration = ${v['system.hardware-acceleration']}`,
+      '',
+      '[updates]',
+      '# Ask GitHub once a day whether a newer version is out, and put it on the',
+      "# tray's own menu item. Nothing is downloaded and nothing pops up.",
+      `check = ${v['updates.check']}`,
+      '',
+    ].join('\n');
+
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(CONFIG_PATH, text);
+    } catch (e) {
+      console.warn('could not write %s: %s', CONFIG_PATH, e.message);
+    }
+  }
+}
+
+module.exports = { Config, CONFIG_PATH, CONFIG_DIR, CUSTOM_CSS_PATH };

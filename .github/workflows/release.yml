@@ -1,0 +1,203 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Run injection tests
+        run: make test
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          find src tools -name '*.js' -print0 | xargs -0 -n1 node --check
+
+  build-deb:
+    name: Build Debian package
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build package
+        run: packaging/build-deb.sh
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: dist/*.deb
+          if-no-files-found: error
+
+  build-rpm:
+    name: Build RPM package
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install RPM build tools
+        run: sudo apt-get update && sudo apt-get install -y binutils rpm
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build package
+        run: packaging/build-rpm.sh
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  build-arch:
+    name: Build Arch Linux package
+    needs: test
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git nodejs npm alsa-lib at-spi2-core cairo cups dbus gtk3 libdrm libx11 libxcomposite libxdamage libxext libxfixes libxrandr mesa nspr nss pango zlib
+      - name: Build package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          # The PKGBUILD fetches the tagged tarball from GitHub, which is what
+          # the AUR needs and the wrong thing here: this repository is private,
+          # so the unauthenticated curl inside makepkg gets a 404 and the build
+          # dies before it starts. CI builds the tarball out of the checkout it
+          # already has and points the recipe at that instead.
+          # Not `git archive`: actions/checkout runs before pacman installs git
+          # in this container, so it falls back to its REST download and there
+          # is no .git to archive from.
+          mkdir -p "dist/whatsapp-desktop-$version"
+          tar -c --exclude=./dist --exclude=./.git --exclude=./node_modules \
+            -C "$GITHUB_WORKSPACE" . | tar -x -C "dist/whatsapp-desktop-$version"
+          tar -czf "dist/whatsapp-desktop-$version.tar.gz" \
+            -C dist "whatsapp-desktop-$version"
+          rm -rf "dist/whatsapp-desktop-$version"
+          cp packaging/PKGBUILD dist/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=$version/" dist/PKGBUILD
+          sed -i 's|^source=.*|source=("$pkgname-$pkgver.tar.gz")|' dist/PKGBUILD
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/dist' && makepkg --clean --cleanbuild --noconfirm"
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  build-appimage:
+    name: Build AppImage
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install AppImage build tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y file desktop-file-utils
+          curl -L -o /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          cd /tmp && ./appimagetool --appimage-extract
+          sudo mv /tmp/squashfs-root /opt/appimagetool
+          sudo ln -sf /opt/appimagetool/AppRun /usr/local/bin/appimagetool
+      - name: Build package
+        run: packaging/build-appimage.sh
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-package
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-deb, build-rpm, build-arch, build-appimage]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download Debian package
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-package
+          path: dist
+      - name: Download RPM package
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-package
+          path: dist
+      - name: Download Arch package
+        uses: actions/download-artifact@v4
+        with:
+          name: arch-package
+          path: dist
+      - name: Download AppImage package
+        uses: actions/download-artifact@v4
+        with:
+          name: appimage-package
+          path: dist
+      - name: Create source archive
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          git archive --format=tar.gz --prefix="whatsapp-desktop-${VERSION}/" -o "dist/whatsapp-desktop-${VERSION}-source.tar.gz" "$RELEASE_TAG"
+          sha256sum dist/* > dist/SHA256SUMS
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          files: dist/*
