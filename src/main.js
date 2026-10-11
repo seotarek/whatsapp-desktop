@@ -1478,6 +1478,12 @@ const createWindow = () => {
     icon: appIcon,
     show: false,
     autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: nativeTheme.shouldUseDarkColors ? '#111b21' : '#f0f2f5',
+      symbolColor: nativeTheme.shouldUseDarkColors ? '#aebac1' : '#54656f',
+      height: 32
+    },
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b141a' : '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
