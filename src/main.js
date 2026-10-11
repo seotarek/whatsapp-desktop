@@ -198,7 +198,7 @@ if (fontConfigFile) {
 /* Electron selects its display backend before loading this file and records
    the result in ozone-platform. Read that choice, not the session environment:
    a Wayland session can still be running this window through XWayland. */
-const chromiumFeatures = ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer'];
+const chromiumFeatures = ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer', 'CanvasOopRasterization', 'BackForwardCache', 'V8OptimizeJavascript'];
 const ozonePlatform = app.commandLine.getSwitchValue('ozone-platform');
 /* process.argv retains the user's arguments, whereas commandLine also has
    Electron's automatically selected backend. An explicit launch option wins
@@ -254,6 +254,10 @@ if (config.get('system.hardware-acceleration') === false) {
   app.commandLine.appendSwitch('ignore-gpu-blocklist');
   app.commandLine.appendSwitch('enable-gpu-rasterization');
   app.commandLine.appendSwitch('enable-smooth-scrolling');
+  app.commandLine.appendSwitch('enable-zero-copy');
+  app.commandLine.appendSwitch('enable-accelerated-2d-canvas');
+  app.commandLine.appendSwitch('enable-accelerated-video-decode');
+  app.commandLine.appendSwitch('renderer-process-limit', '4');
 }
 /* WebGPU on Linux/Wayland has a broken CreateExternalTexture pipeline for video
    streams, which causes WhatsApp call cameras to render black 1280x720 frames.
