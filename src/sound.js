@@ -1,29 +1,14 @@
 /*
  * The notification tone.
- *
- * GNOME plays a sound for a notification only when the notification asks for
- * one, through the `sound-name` or `sound-file` hint of the Notify call --
- * and Electron's Notification has no way to set a hint. Measured on the bus:
- * what goes out is sender-pid, desktop-entry, urgency and image-data, and
- * nothing else. So a banner this client raises is silent, and that is why
- * messages arriving while the window was in front made no sound while messages
- * arriving behind it did: those are WhatsApp Web's own notification and its own
- * <audio> element, which is not silent at all.
- *
- * The tone is therefore played by the client, and played through the page --
- * where it becomes part of the application's own audio stream, follows its
- * volume in the mixer, and needs no player binary to be installed. It is read
- * from the desktop's sound theme rather than shipped, so it is the sound the
- * rest of the desktop makes.
+ * Plays via native desktop audio (canberra-gtk-play / pw-play / paplay)
+ * or falls back to Web Audio decoding.
  */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
-/* The freedesktop sound naming spec calls it this; `message` is the fallback
-   every theme has. */
 const NAMES = ['message-new-instant', 'message'];
 const PROFILES = ['stereo', ''];
 const EXTENSIONS = { '.oga': 'audio/ogg', '.ogg': 'audio/ogg', '.wav': 'audio/wav' };
@@ -45,9 +30,6 @@ const dataDirs = () => {
   return [home, ...dirs];
 };
 
-/* Themes inherit, and following that properly means parsing index.theme; the
-   fallback is named in the spec and every theme has it, so both are tried and
-   the first hit wins. */
 const find = () => {
   const themes = [...new Set([themeName(), 'freedesktop'])];
   for (const dir of dataDirs()) {
@@ -56,7 +38,7 @@ const find = () => {
         for (const name of NAMES) {
           for (const [ext, mime] of Object.entries(EXTENSIONS)) {
             const file = path.join(dir, 'sounds', theme, profile, name + ext);
-            if (fs.existsSync(file)) return { file, mime };
+            if (fs.existsSync(file)) return { file, mime, name };
           }
         }
       }
@@ -67,8 +49,6 @@ const find = () => {
 
 let cached;
 
-/* Read once and kept: it is a few kilobytes, and re-reading it in front of every
-   banner would put a disk seek where a sound should be. */
 const tone = () => {
   if (cached !== undefined) return cached;
   cached = null;
@@ -82,11 +62,46 @@ const tone = () => {
   try {
     const bytes = fs.readFileSync(hit.file);
     if (bytes.length && bytes.length < 2 * 1024 * 1024)
-      cached = { data: bytes.toString('base64'), mime: hit.mime, file: hit.file };
+      cached = { data: bytes.toString('base64'), mime: hit.mime, file: hit.file, name: hit.name };
   } catch (e) {
     console.warn('could not read %s: %s', hit.file, e.message);
   }
   return cached;
 };
 
-module.exports = { tone };
+// Play sound natively through Linux audio daemon
+const playNative = () => {
+  const hit = find();
+  const file = hit ? hit.file : null;
+
+  // Try canberra-gtk-play first (standard GNOME event sound player)
+  try {
+    const cp = spawn('canberra-gtk-play', ['-i', 'message-new-instant'], {
+      detached: true,
+      stdio: 'ignore'
+    });
+    cp.unref();
+    return true;
+  } catch (e) {}
+
+  // Fallback to direct sound file players if canberra fails
+  if (file && fs.existsSync(file)) {
+    const players = [
+      { cmd: 'pw-play', args: [file] },
+      { cmd: 'paplay', args: [file] },
+      { cmd: 'aplay', args: ['-q', file] }
+    ];
+
+    for (const p of players) {
+      try {
+        const cp = spawn(p.cmd, p.args, { detached: true, std: 'ignore' });
+        cp.unref();
+        return true;
+      } catch (e) {}
+    }
+  }
+
+  return false;
+};
+
+module.exports = { tone, playNative };

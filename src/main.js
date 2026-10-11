@@ -2004,15 +2004,7 @@ const onPopupKey = (popup, event, input) => {
 const playTone = () => {
   if (!config.get('notifications.sound')) return;
   if (!win || win.isDestroyed()) return;
-  /* The desktop has the last word.
-   *
-   * A notification daemon reads the urgency and the do-not-disturb setting and
-   * decides whether to put a banner on screen, and it decides whether to make a
-   * sound the same way -- but only for the sound IT plays, from the hint on the
-   * call. This tone is played by the client, through the page, and the daemon
-   * knows nothing about it. So do-not-disturb silenced the banner and left the
-   * sound, which is the opposite of what do-not-disturb is for. Asked here
-   * instead, and the same question the shell asks itself. */
+
   if (!desktop.notificationsAllowed()) {
     console.log('the tone is not played: the desktop is not taking notifications');
     return;
@@ -2021,7 +2013,14 @@ const playTone = () => {
     console.log('the tone is not played: the desktop has its alert sounds off');
     return;
   }
-  win.webContents.send('wa:play-tone', null);
+
+  // Play immediately via system sound daemon for reliable audio even when hidden/in tray
+  const playedNatively = sound.playNative();
+
+  // Also trigger page-level tone as fallback if native player was not available
+  if (!playedNatively) {
+    win.webContents.send('wa:play-tone', null);
+  }
 };
 
 /* ------------------------------------------------------------ withdrawals */
