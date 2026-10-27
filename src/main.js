@@ -1583,12 +1583,7 @@ const createWindow = () => {
 
   for (const event of ['show', 'hide', 'focus', 'blur', 'restore']) win.on(event, pushFocus);
 
-  win.on('focus', () => {
-    if (lock.isLocked || lock.isCorrupted) {
-      if (lockWin && !lockWin.isDestroyed()) lockWin.focus();
-      else openLock();
-    }
-  });
+  win.on('focus', redirectFocusToLock);
 
   traceWindowState();
 
@@ -2474,6 +2469,13 @@ const unlockApp = () => {
   lockWin = null;
   lock.recordActivity();
   console.log('lock: open');
+};
+
+const redirectFocusToLock = () => {
+  if (lock.isLocked || lock.isCorrupted) {
+    if (lockWin && !lockWin.isDestroyed()) lockWin.focus();
+    else openLock();
+  }
 };
 
 /* Every half minute, which is as often as a fifteen-minute timeout needs

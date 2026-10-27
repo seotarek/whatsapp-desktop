@@ -466,10 +466,12 @@ const createLockHarness = (lockInstance) => {
   vm.runInContext(
     lockControllerCode +
     '\n' +
+    'win.on("focus", redirectFocusToLock);\n' +
     'globalThis.controls = {\n' +
     '  openLock,\n' +
     '  lockApp,\n' +
     '  unlockApp,\n' +
+    '  redirectFocusToLock,\n' +
     '  getLockWin: () => lockWin,\n' +
     '  setQuitting: (v) => { quitting = v; },\n' +
     '  getQuitting: () => quitting,\n' +
@@ -535,7 +537,7 @@ check('valid passcode: unlockApp destroys lock window', vWin2.isDestroyed(), tru
 check('valid passcode: lock window is NOT re-opened after legitimate unlock', validControls.getLockWin(), null);
 validLock.removePasscode('correct-pin');
 
-/* Scenario 3: Intentional Application Quit */
+/* Scenario 3: Intentional Application Quit via Ctrl+Q */
 const quitCfg = fake();
 const quitLock = new LockManager(quitCfg);
 quitLock.setPasscode('quit-pin');
@@ -544,28 +546,30 @@ const quitControls = createLockHarness(quitLock);
 
 const qWin = quitControls.openLock();
 check('quit scenario: lock window opened', !!qWin, true);
-quitControls.setQuitting(true);
+
+// Trigger Ctrl+Q via before-input-event on lockWin.webContents
+const qInputEvent = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+qWin.webContents.emit('before-input-event', qInputEvent, { type: 'keyDown', control: true, key: 'q' });
+check('quit scenario: Ctrl+Q prevented default on before-input-event', qInputEvent.defaultPrevented, true);
+check('quit scenario: Ctrl+Q called quit() setting quitting to true', quitControls.getQuitting(), true);
+
 const qCloseSuccess = qWin.close();
 check('quit scenario: close event is allowed when quitting', qCloseSuccess, true);
 check('quit scenario: lock window is destroyed when quitting', qWin.isDestroyed(), true);
 check('quit scenario: lock window does NOT re-open when quitting', quitControls.getLockWin(), null);
 quitLock.removePasscode('quit-pin');
 
-/* Scenario 4: Parent window focus redirection */
+/* Scenario 4: Parent window focus redirection via production redirectFocusToLock */
 const focusCfg = fake();
 const focusLock = new LockManager(focusCfg);
 focusLock.setPasscode('focus-pin');
 focusLock.isLocked = true;
-let lockWinRef = null;
-const mockMainWin = new MockBrowserWindow();
-mockMainWin.on('focus', () => {
-  if (focusLock.isLocked || focusLock.isCorrupted) {
-    if (lockWinRef && !lockWinRef.isDestroyed()) lockWinRef.focus();
-  }
-});
-lockWinRef = new MockBrowserWindow();
-mockMainWin.emit('focus');
-check('main window focus redirects to lock window while locked', lockWinRef.focused, true);
+const focusControls = createLockHarness(focusLock);
+const fLockWin = focusControls.openLock();
+check('focus test: lock window is opened', !!fLockWin, true);
+fLockWin.focused = false; // Reset to verify focus event redirects
+focusControls.win.emit('focus');
+check('main window focus redirects to lock window via main.js redirectFocusToLock', fLockWin.focused, true);
 focusLock.removePasscode('focus-pin');
 
 fs.rmSync(sandbox, { recursive: true, force: true });

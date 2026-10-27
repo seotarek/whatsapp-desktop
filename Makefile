@@ -197,6 +197,7 @@ test:
 	@node tools/test-update.js
 	@node tools/test-ipc.js
 	@node tools/test-permissions-screenshare.js
+	@test ! -x node_modules/.bin/electron || env -u ELECTRON_RUN_AS_NODE node_modules/.bin/electron tools/test-lock-electron.js
 	@python3 tools/gate_security_audit.py src/
 
 run:
