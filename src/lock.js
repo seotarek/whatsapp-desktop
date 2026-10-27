@@ -85,14 +85,26 @@ class LockManager {
       this.isLocked = false;
       return true;
     } catch (err) {
+      let rollbackErr = null;
       if (prevSalt && prevHash) {
-        try { saveSecurityState(prevSalt, prevHash); } catch (_) {}
+        try {
+          saveSecurityState(prevSalt, prevHash);
+        } catch (rErr) {
+          rollbackErr = rErr;
+        }
       } else {
-        try { removeSecurityFile(); } catch (_) {}
+        try {
+          removeSecurityFile();
+        } catch (rErr) {
+          rollbackErr = rErr;
+        }
       }
       this.salt = prevSalt;
       this.hash = prevHash;
       this.config.set('lock.enabled', prevEnabled);
+      if (rollbackErr) {
+        throw new Error(`Failed to persist lock configuration (${err.message}) and rollback failed: ${rollbackErr.message}`);
+      }
       throw new Error(`Failed to persist lock configuration: ${err.message}`);
     }
   }
@@ -112,20 +124,25 @@ class LockManager {
     const prevEnabled = this.config.get('lock.enabled');
 
     try {
+      // 1. Commit config to disk FIRST before unlinking credentials
+      this.config.set('lock.enabled', false);
+      this.config.save({ throwOnError: true });
+
+      // 2. Only unlink credentials file after config is safely saved
       removeSecurityFile();
       this.salt = null;
       this.hash = null;
-      this.config.set('lock.enabled', false);
-      this.config.save({ throwOnError: true });
       this.isLocked = false;
       return true;
     } catch (err) {
-      if (prevSalt && prevHash) {
-        try { saveSecurityState(prevSalt, prevHash); } catch (_) {}
-      }
+      // If config save failed, security.json was never deleted.
+      // If removeSecurityFile failed after config save, restore config.
       this.salt = prevSalt;
       this.hash = prevHash;
       this.config.set('lock.enabled', prevEnabled);
+      try {
+        this.config.save();
+      } catch (_) {}
       throw new Error(`Failed to persist lock removal: ${err.message}`);
     }
   }

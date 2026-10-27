@@ -95,6 +95,14 @@ check('and a number that is one is a number', typed.get('lock.timeout'), 5);
 check('custom.css is in the config directory',
       path.dirname(CUSTOM_CSS_PATH), path.dirname(CONFIG_PATH));
 
+/* Atomic file permissions */
+const permCfg = new Config();
+permCfg.save();
+const statCfg = fs.statSync(CONFIG_PATH);
+check('config file written with 0600 permissions', (statCfg.mode & 0o777).toString(8), '600');
+const statDir = fs.statSync(path.dirname(CONFIG_PATH));
+check('config dir created with 0700 permissions', (statDir.mode & 0o777).toString(8), '700');
+
 fs.rmSync(sandbox, { recursive: true, force: true });
 
 console.log(failures ? `\n${failures} config check(s) failed` : '\nconfig checks pass');

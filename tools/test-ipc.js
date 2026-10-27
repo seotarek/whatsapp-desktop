@@ -202,6 +202,12 @@ const setupRig = () => {
     pendingText: '',
   };
 
+  const isWhatsAppWebSnippet = mainSource.slice(
+    mainSource.indexOf('const isWhatsAppWeb ='),
+    mainSource.indexOf('const ALLOWED_EXTERNAL_PROTOCOLS =')
+  );
+  vm.runInNewContext(isWhatsAppWebSnippet + '\ncontext.isWhatsAppWeb = isWhatsAppWeb;', { URL, context });
+
   vm.runInNewContext(wireIpcSnippet + '\nwireIpc();', context);
 
   return {
@@ -232,6 +238,40 @@ async function run() {
   };
   const waResult = await settingsGet(waEvent);
   check('settings:get returns null to https://web.whatsapp.com/', waResult === null);
+
+  // 1b. Strict isMainWindow validation against insecure protocols, ports, and credentials
+  const initialTheme = rig.listeners.get('wa:initial-theme')?.[0];
+  const validThemeEvent = {
+    sender: rig.win.webContents,
+    senderFrame: { url: 'https://web.whatsapp.com/', parent: null },
+    returnValue: null,
+  };
+  initialTheme(validThemeEvent);
+  check('wa:initial-theme responds to valid https://web.whatsapp.com/', validThemeEvent.returnValue !== null);
+
+  const httpEvent = {
+    sender: rig.win.webContents,
+    senderFrame: { url: 'http://web.whatsapp.com/', parent: null },
+    returnValue: 'not-null',
+  };
+  initialTheme(httpEvent);
+  check('wa:initial-theme returns null to insecure http://web.whatsapp.com/', httpEvent.returnValue === null);
+
+  const portEvent = {
+    sender: rig.win.webContents,
+    senderFrame: { url: 'https://web.whatsapp.com:8080/', parent: null },
+    returnValue: 'not-null',
+  };
+  initialTheme(portEvent);
+  check('wa:initial-theme returns null to non-default port 8080', portEvent.returnValue === null);
+
+  const credEvent = {
+    sender: rig.win.webContents,
+    senderFrame: { url: 'https://user:pass@web.whatsapp.com/', parent: null },
+    returnValue: 'not-null',
+  };
+  initialTheme(credEvent);
+  check('wa:initial-theme returns null to embedded credentials URL', credEvent.returnValue === null);
 
   // 2. Iframe inside WhatsApp Web calling settings:get
   const iframeEvent = {

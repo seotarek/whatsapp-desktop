@@ -2674,13 +2674,9 @@ const wireIpc = () => {
     }
   };
 
-  const isWhatsAppWeb = event => {
+  const isWhatsAppWebSender = event => {
     if (!event || !event.senderFrame || !event.senderFrame.url) return false;
-    try {
-      return new URL(event.senderFrame.url).hostname === 'web.whatsapp.com';
-    } catch (e) {
-      return false;
-    }
+    return isWhatsAppWeb(event.senderFrame.url);
   };
 
   const isSettingsOrFonts = event => {
@@ -2703,7 +2699,7 @@ const wireIpc = () => {
   const isMainWindow = event => {
     if (!event || !event.sender) return false;
     if (!isFromWindow(event, win) || !isTopFrame(event)) return false;
-    return isWhatsAppWeb(event) || isFromLocalFile(event, 'connection.html');
+    return isWhatsAppWebSender(event) || isFromLocalFile(event, 'connection.html');
   };
 
   ipcMain.on('wa:log', (event, message) => {

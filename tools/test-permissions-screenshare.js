@@ -29,7 +29,16 @@ const check = (label, ok, details = "") => {
 
 const mainSource = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
 
-const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = false, sources = [] } = {}) => {
+const setupHarness = ({
+  onWayland = false,
+  dialogChoice = 0,
+  dialogThrows = false,
+  sources = [],
+  enableGuiPicker = false,
+  guiAction = "select",
+  selectedGuiIndex = 0,
+  pickerThrows = false,
+} = {}) => {
   let permissionRequestHandler = null;
   let permissionCheckHandler = null;
   let devicePermissionHandler = null;
@@ -55,7 +64,71 @@ const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = fals
     },
   };
 
-  const win = { isDestroyed: () => false };
+  let lastPickerWindow = null;
+  let sentSources = null;
+  const ipcListeners = new Map();
+
+  const ipcMain = {
+    on: (channel, fn) => {
+      if (!ipcListeners.has(channel)) ipcListeners.set(channel, []);
+      ipcListeners.get(channel).push(fn);
+    },
+    removeListener: (channel, fn) => {
+      if (ipcListeners.has(channel)) {
+        const arr = ipcListeners.get(channel).filter(f => f !== fn);
+        ipcListeners.set(channel, arr);
+      }
+    },
+    listenerCount: channel => (ipcListeners.get(channel) || []).length,
+  };
+
+  class MockBrowserWindow {
+    constructor(opts) {
+      if (pickerThrows) throw new Error("Simulated picker window creation failure");
+      this.opts = opts;
+      this._destroyed = false;
+      this.webContents = {
+        once: (event, cb) => {
+          if (event === "did-finish-load") {
+            process.nextTick(() => {
+              if (this._destroyed) return;
+              cb();
+              if (guiAction === "select") {
+                const handlers = (ipcListeners.get("picker:select") || []).slice();
+                handlers.forEach(h => h({ sender: this.webContents }, selectedGuiIndex));
+              } else if (guiAction === "cancel") {
+                const handlers = (ipcListeners.get("picker:cancel") || []).slice();
+                handlers.forEach(h => h({ sender: this.webContents }));
+              } else if (guiAction === "close") {
+                this.close();
+              }
+            });
+          }
+        },
+        send: (channel, data) => {
+          if (channel === "picker:sources") sentSources = data;
+        },
+      };
+      this._events = new Map();
+      lastPickerWindow = this;
+    }
+    loadFile(filePath) { this.loadedFile = filePath; }
+    isDestroyed() { return this._destroyed; }
+    close() {
+      if (this._destroyed) return;
+      this._destroyed = true;
+      const cbs = (this._events.get("closed") || []).slice();
+      cbs.forEach(cb => cb());
+    }
+    on(event, cb) {
+      if (!this._events.has(event)) this._events.set(event, []);
+      this._events.get(event).push(cb);
+    }
+  }
+
+  const win = enableGuiPicker
+    ? { isDestroyed: () => false, webContents: {} }
+    : { isDestroyed: () => false };
 
   const startPerm = mainSource.indexOf("const ALLOWED_PERMISSIONS =");
   const endScreen = mainSource.indexOf("\n};\n\n/* WhatsApp Web keys", startPerm);
@@ -76,9 +149,9 @@ const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = fals
     console: { log: () => {}, warn: () => {} },
     Promise,
     setTimeout,
-    BrowserWindow: undefined,
+    BrowserWindow: enableGuiPicker ? MockBrowserWindow : undefined,
     nativeTheme: { shouldUseDarkColors: true },
-    ipcMain: { on: () => {}, removeListener: () => {} },
+    ipcMain,
     path: require('path'),
     __dirname: path.join(__dirname, '../src'),
   };
@@ -109,6 +182,9 @@ const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = fals
       return result;
     },
     getDialogOptions: () => dialogOptionsCaptured,
+    getLastPickerWindow: () => lastPickerWindow,
+    getSentSources: () => sentSources,
+    getIpcListenerCount: channel => ipcMain.listenerCount(channel),
   };
 };
 
@@ -303,6 +379,95 @@ async function run() {
   });
   check("screenshare on Wayland blocks non-whatsapp origin before portal delegation",
     waylandDenied.video === null
+  );
+
+  /* ------------------------------------------------ Screen Sharing GUI Picker (showPickerWindow) */
+  // 1. GUI picker launches, serializes all sources, and user selects an item
+  const hGuiSelect = setupHarness({
+    onWayland: false,
+    enableGuiPicker: true,
+    guiAction: "select",
+    selectedGuiIndex: 1,
+    sources: defaultSources,
+  });
+  const guiSelectResult = await hGuiSelect.requestScreenShare({
+    securityOrigin: "https://web.whatsapp.com",
+    userGesture: true,
+    frame: { parent: null },
+  });
+  const pickerWin = hGuiSelect.getLastPickerWindow();
+  check("GUI picker launches modal BrowserWindow with share-picker.html",
+    pickerWin &&
+    pickerWin.opts.modal === true &&
+    pickerWin.opts.width === 680 &&
+    pickerWin.opts.height === 540 &&
+    pickerWin.opts.webPreferences.preload.endsWith("share-picker-preload.js") &&
+    pickerWin.loadedFile.endsWith("share-picker.html")
+  );
+  check("GUI picker serializes all sources via did-finish-load",
+    Array.isArray(hGuiSelect.getSentSources()) &&
+    hGuiSelect.getSentSources().length === defaultSources.length &&
+    hGuiSelect.getSentSources()[0].isScreen === true
+  );
+  check("GUI picker returns selected source on picker:select IPC",
+    guiSelectResult.video && guiSelectResult.video.id === "screen:1:0"
+  );
+  check("GUI picker cleans up IPC listeners and closes window after selection",
+    pickerWin.isDestroyed() === true &&
+    hGuiSelect.getIpcListenerCount("picker:select") === 0 &&
+    hGuiSelect.getIpcListenerCount("picker:cancel") === 0
+  );
+
+  // 2. GUI picker cancelled by user
+  const hGuiCancel = setupHarness({
+    onWayland: false,
+    enableGuiPicker: true,
+    guiAction: "cancel",
+    sources: defaultSources,
+  });
+  const guiCancelResult = await hGuiCancel.requestScreenShare({
+    securityOrigin: "https://web.whatsapp.com",
+    userGesture: true,
+    frame: { parent: null },
+  });
+  check("GUI picker returns video: null on picker:cancel IPC",
+    guiCancelResult.video === null &&
+    hGuiCancel.getLastPickerWindow().isDestroyed() === true &&
+    hGuiCancel.getIpcListenerCount("picker:select") === 0
+  );
+
+  // 3. GUI picker closed by user
+  const hGuiClose = setupHarness({
+    onWayland: false,
+    enableGuiPicker: true,
+    guiAction: "close",
+    sources: defaultSources,
+  });
+  const guiCloseResult = await hGuiClose.requestScreenShare({
+    securityOrigin: "https://web.whatsapp.com",
+    userGesture: true,
+    frame: { parent: null },
+  });
+  check("GUI picker fails closed (video: null) on window closed event",
+    guiCloseResult.video === null &&
+    hGuiClose.getIpcListenerCount("picker:select") === 0
+  );
+
+  // 4. GUI picker instantiation failure falls back cleanly to dialog
+  const hGuiFallback = setupHarness({
+    onWayland: false,
+    enableGuiPicker: true,
+    pickerThrows: true,
+    dialogChoice: 0,
+    sources: defaultSources,
+  });
+  const guiFallbackResult = await hGuiFallback.requestScreenShare({
+    securityOrigin: "https://web.whatsapp.com",
+    userGesture: true,
+    frame: { parent: null },
+  });
+  check("GUI picker failure falls back cleanly to dialog",
+    guiFallbackResult.video && guiFallbackResult.video.id === "screen:0:0"
   );
 
   console.log("\npermissions and screenshare security checks pass");

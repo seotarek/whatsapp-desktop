@@ -388,11 +388,19 @@ class Config {
       '',
     ].join('\n');
 
+    const tempPath = `${CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(CONFIG_PATH, text);
+      fs.chmodSync(CONFIG_DIR, 0o700);
+      fs.writeFileSync(tempPath, text, { mode: 0o600 });
+      fs.chmodSync(tempPath, 0o600);
+      fs.renameSync(tempPath, CONFIG_PATH);
+      fs.chmodSync(CONFIG_PATH, 0o600);
       return true;
     } catch (e) {
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch (_) {}
       console.warn('could not write %s: %s', CONFIG_PATH, e.message);
       if (options && options.throwOnError === true) {
         throw new Error(`Could not write config file ${CONFIG_PATH}: ${e.message}`);

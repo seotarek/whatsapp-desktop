@@ -32,6 +32,9 @@ jobs:
       - name: Security audit dependencies
         run: npm audit
 
+      - name: Deterministic SAST Security Audit
+        run: python3 tools/gate_security_audit.py src/
+
       - name: Check JavaScript syntax
         shell: bash
         run: |
