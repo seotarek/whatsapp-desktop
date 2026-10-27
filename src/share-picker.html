@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Share Your Screen - WhatsApp</title>
+  <style>
+    :root {
+      --bg-color: #111b21;
+      --bg-surface: #202c33;
+      --bg-card: #182229;
+      --bg-card-hover: #222e35;
+      --bg-card-selected: #2a3942;
+      --text-primary: #e9edef;
+      --text-secondary: #8696a0;
+      --accent: #00a884;
+      --accent-hover: #029071;
+      --border-color: #2a3942;
+      --border-selected: #00a884;
+      --font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans Arabic', sans-serif;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-color: #f0f2f5;
+        --bg-surface: #ffffff;
+        --bg-card: #f7f8fa;
+        --bg-card-hover: #eaeef1;
+        --bg-card-selected: #e1f5ef;
+        --text-primary: #111b21;
+        --text-secondary: #667781;
+        --accent: #00a884;
+        --accent-hover: #029071;
+        --border-color: #d1d7db;
+        --border-selected: #00a884;
+      }
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-primary);
+      font-family: var(--font-family);
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      padding-block: 16px 12px;
+      padding-inline: 20px;
+      border-block-end: 1px solid var(--border-color);
+      background-color: var(--bg-surface);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    h1 {
+      font-size: 1.15rem;
+      font-weight: 600;
+    }
+    p.subtitle {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .filters {
+      display: flex;
+      gap: 8px;
+      margin-block-start: 10px;
+    }
+    .filter-btn {
+      padding-block: 4px;
+      padding-inline: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--border-color);
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    .filter-btn.active {
+      background-color: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 14px;
+      align-content: start;
+    }
+    .source-card {
+      background-color: var(--bg-card);
+      border: 2px solid var(--border-color);
+      border-radius: 10px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s ease, transform 0.15s ease, background-color 0.15s ease;
+    }
+    .source-card:hover {
+      background-color: var(--bg-card-hover);
+      border-color: var(--text-secondary);
+    }
+    .source-card.selected {
+      border-color: var(--border-selected);
+      background-color: var(--bg-card-selected);
+    }
+    .thumb-wrapper {
+      width: 100%;
+      height: 105px;
+      background-color: #0b141a;
+      border-radius: 6px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .thumb-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .thumb-placeholder {
+      font-size: 2rem;
+      opacity: 0.4;
+    }
+    .card-footer {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .badge {
+      font-size: 0.68rem;
+      padding-block: 2px;
+      padding-inline: 6px;
+      border-radius: 4px;
+      background-color: var(--border-color);
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .card-name {
+      font-size: 0.8rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+    footer {
+      padding-block: 14px;
+      padding-inline: 20px;
+      border-block-start: 1px solid var(--border-color);
+      background-color: var(--bg-surface);
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+    }
+    button.btn {
+      padding-block: 8px;
+      padding-inline: 20px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background-color 0.15s ease, opacity 0.15s ease;
+    }
+    button.btn-secondary {
+      background-color: transparent;
+      border-color: var(--border-color);
+      color: var(--text-primary);
+    }
+    button.btn-secondary:hover {
+      background-color: var(--bg-card-hover);
+    }
+    button.btn-primary {
+      background-color: var(--accent);
+      color: #ffffff;
+    }
+    button.btn-primary:hover:not(:disabled) {
+      background-color: var(--accent-hover);
+    }
+    button.btn-primary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .empty-state {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding-block: 40px;
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Share your screen</h1>
+    <p class="subtitle">WhatsApp Web is requesting to share a screen or window</p>
+    <div class="filters">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="screen">Screens</button>
+      <button class="filter-btn" data-filter="window">Windows</button>
+    </div>
+  </header>
+
+  <main id="sourcesList"></main>
+
+  <footer>
+    <button class="btn btn-secondary" id="cancelBtn" autofocus>Cancel</button>
+    <button class="btn btn-primary" id="shareBtn" disabled>Share</button>
+  </footer>
+
+  <script>
+    let allSources = [];
+    let currentFilter = 'all';
+    let selectedIndex = -1;
+
+    const listEl = document.getElementById('sourcesList');
+    const shareBtn = document.getElementById('shareBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const filterBtns = document.querySelectorAll('.filter-btn');
+
+    function renderSources() {
+      listEl.innerHTML = '';
+      const filtered = allSources.filter(s => {
+        if (currentFilter === 'screen') return s.isScreen;
+        if (currentFilter === 'window') return !s.isScreen;
+        return true;
+      });
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = '<div class="empty-state">No available capture sources found.</div>';
+        return;
+      }
+
+      filtered.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'source-card' + (s.index === selectedIndex ? ' selected' : '');
+        card.dataset.index = s.index;
+
+        const thumbWrapper = document.createElement('div');
+        thumbWrapper.className = 'thumb-wrapper';
+        if (s.thumbnail) {
+          const img = document.createElement('img');
+          img.className = 'thumb-img';
+          img.src = s.thumbnail;
+          thumbWrapper.appendChild(img);
+        } else {
+          const placeholder = document.createElement('span');
+          placeholder.className = 'thumb-placeholder';
+          placeholder.textContent = s.isScreen ? '🖥️' : '🪟';
+          thumbWrapper.appendChild(placeholder);
+        }
+
+        const footer = document.createElement('div');
+        footer.className = 'card-footer';
+
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = s.isScreen ? 'Screen' : 'Window';
+
+        const name = document.createElement('span');
+        name.className = 'card-name';
+        name.textContent = s.name;
+        name.title = s.name;
+
+        footer.appendChild(badge);
+        footer.appendChild(name);
+
+        card.appendChild(thumbWrapper);
+        card.appendChild(footer);
+
+        card.addEventListener('click', () => {
+          selectCard(s.index);
+        });
+
+        card.addEventListener('dblclick', () => {
+          selectCard(s.index);
+          doShare();
+        });
+
+        listEl.appendChild(card);
+      });
+    }
+
+    function selectCard(idx) {
+      selectedIndex = idx;
+      shareBtn.disabled = selectedIndex < 0;
+      document.querySelectorAll('.source-card').forEach(el => {
+        el.classList.toggle('selected', Number(el.dataset.index) === idx);
+      });
+    }
+
+    function doShare() {
+      if (selectedIndex >= 0 && window.pickerApi) {
+        window.pickerApi.select(selectedIndex);
+      }
+    }
+
+    function doCancel() {
+      if (window.pickerApi) {
+        window.pickerApi.cancel();
+      }
+    }
+
+    shareBtn.addEventListener('click', doShare);
+    cancelBtn.addEventListener('click', doCancel);
+
+    filterBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        filterBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFilter = btn.dataset.filter;
+        renderSources();
+      });
+    });
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        doCancel();
+      } else if (e.key === 'Enter') {
+        if (document.activeElement === cancelBtn) {
+          doCancel();
+        } else if (selectedIndex >= 0) {
+          doShare();
+        }
+      }
+    });
+
+    if (window.pickerApi) {
+      window.pickerApi.onSources(sources => {
+        allSources = sources || [];
+        renderSources();
+      });
+    }
+  </script>
+</body>
+</html>

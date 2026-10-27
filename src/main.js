@@ -1684,36 +1684,16 @@ const createWindow = () => {
   connection.start();
 };
 
-const isWhatsApp = url => {
-  if (!url) return true;
-  if (url.startsWith('blob:') || url.startsWith('data:') || url.startsWith('about:')) return true;
-  try {
-    const host = new URL(url).hostname;
-    return host === 'web.whatsapp.com' || host.endsWith('.whatsapp.com') || host === 'whatsapp.com';
-  } catch (e) {
-    return false;
-  }
-};
-
-const isWhatsAppSecure = url => {
-  if (!url || typeof url !== 'string') return false;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname;
-    return host === 'web.whatsapp.com' || host === 'whatsapp.com' || host.endsWith('.whatsapp.com');
-  } catch (e) {
-    return false;
-  }
-};
-
-/* Strictly the WhatsApp Web client itself over secure HTTPS.
+/* Strictly the WhatsApp Web client itself over standard secure HTTPS (port 443, no embedded credentials).
    Used for main window navigation, popups, screen sharing, and media permissions. */
 const isWhatsAppWeb = url => {
   if (!url || typeof url !== 'string') return false;
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && parsed.hostname === 'web.whatsapp.com';
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'web.whatsapp.com') return false;
+    if (parsed.port && parsed.port !== '443') return false;
+    if (parsed.username || parsed.password) return false;
+    return true;
   } catch (e) {
     return false;
   }
@@ -3646,8 +3626,136 @@ const wirePermissions = ses => {
     return isWhatsAppWeb(origin || (contents && contents.getURL()) || '');
   });
 
-  ses.setDevicePermissionHandler(details =>
-    isWhatsAppWeb((details && details.origin) || ''));
+  ses.setDevicePermissionHandler(details => {
+    // WhatsApp Web operates entirely via standard WebRTC for audio/video media.
+    // It does not require direct hardware access to USB, HID, Serial, or Bluetooth devices.
+    // Fail-closed by default to prevent rogue peripheral probing or exploitation.
+    if (details && details.deviceType) {
+      console.warn('security: blocked device permission request for deviceType "%s" from origin "%s"',
+        details.deviceType, details.origin || '');
+    }
+    return false;
+  });
+};
+
+let screenPickerWin = null;
+
+const showPickerWindow = (parentWin, sources) => {
+  return new Promise(resolve => {
+    let resolved = false;
+    const finish = result => {
+      if (resolved) return;
+      resolved = true;
+      if (screenPickerWin && !screenPickerWin.isDestroyed()) {
+        try { screenPickerWin.close(); } catch (_) {}
+      }
+      screenPickerWin = null;
+      resolve(result);
+    };
+
+    const isDark = nativeTheme ? nativeTheme.shouldUseDarkColors : true;
+    const pickerWin = new BrowserWindow({
+      parent: parentWin,
+      modal: true,
+      width: 680,
+      height: 540,
+      center: true,
+      resizable: true,
+      title: 'Share your screen or a window - WhatsApp',
+      backgroundColor: isDark ? '#111b21' : '#f0f2f5',
+      autoHideMenuBar: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'share-picker-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+
+    screenPickerWin = pickerWin;
+
+    pickerWin.loadFile(path.join(__dirname, 'share-picker.html'));
+
+    pickerWin.webContents.once('did-finish-load', () => {
+      const serializableSources = sources.map((s, idx) => ({
+        index: idx,
+        id: s.id,
+        name: s.name || `Source ${idx + 1}`,
+        thumbnail: (s.thumbnail && typeof s.thumbnail.toDataURL === 'function')
+          ? s.thumbnail.toDataURL()
+          : (typeof s.thumbnail === 'string' ? s.thumbnail : null),
+        isScreen: s.id.startsWith('screen:'),
+      }));
+      pickerWin.webContents.send('picker:sources', serializableSources);
+    });
+
+    const onSelect = (event, selectedIndex) => {
+      if (event.sender === pickerWin.webContents) {
+        ipcMain.removeListener('picker:select', onSelect);
+        ipcMain.removeListener('picker:cancel', onCancel);
+        const source = (selectedIndex >= 0 && selectedIndex < sources.length)
+          ? sources[selectedIndex]
+          : null;
+        finish(source);
+      }
+    };
+
+    const onCancel = event => {
+      if (event.sender === pickerWin.webContents) {
+        ipcMain.removeListener('picker:select', onSelect);
+        ipcMain.removeListener('picker:cancel', onCancel);
+        finish(null);
+      }
+    };
+
+    ipcMain.on('picker:select', onSelect);
+    ipcMain.on('picker:cancel', onCancel);
+
+    pickerWin.on('closed', () => {
+      ipcMain.removeListener('picker:select', onSelect);
+      ipcMain.removeListener('picker:cancel', onCancel);
+      finish(null);
+    });
+  });
+};
+
+const pickScreenSource = async (parentWin, sources) => {
+  if (!sources || !sources.length) return null;
+
+  // Real BrowserWindow picker when running in graphical Electron session
+  if (typeof BrowserWindow !== 'undefined' && parentWin && typeof parentWin.isDestroyed === 'function' && !parentWin.isDestroyed() && parentWin.webContents) {
+    try {
+      return await showPickerWindow(parentWin, sources);
+    } catch (pickerErr) {
+      console.warn('screen picker window failed, falling back to dialog:', pickerErr.message);
+    }
+  }
+
+  // Fallback / headless dialog picker
+  try {
+    const buttons = sources.map(s => s.name || s.id);
+    buttons.push('Cancel');
+    const cancelId = buttons.length - 1;
+
+    const choice = dialog.showMessageBoxSync(parentWin, {
+      type: 'question',
+      buttons,
+      defaultId: cancelId, // Cancel is the conservative default to prevent accidental sharing
+      cancelId,
+      title: 'Share Your Screen',
+      message: 'WhatsApp Web is requesting to share your screen or a window.',
+      detail: 'Select the screen or window you want to share (default: Cancel):',
+      noLink: true,
+    });
+
+    if (choice < 0 || choice >= sources.length || choice === cancelId) {
+      return null;
+    }
+    return sources[choice];
+  } catch (dialogErr) {
+    console.warn('screen sharing dialog failed:', dialogErr.message);
+    return null;
+  }
 };
 
 const wireScreenSharing = ses => {
@@ -3663,6 +3771,10 @@ const wireScreenSharing = ses => {
       return;
     }
 
+    /* Note on Linux Wayland vs macOS:
+       Official Electron documentation notes that `useSystemPicker` is supported officially on macOS 15+.
+       On Linux under Wayland with Chromium/Electron, PipeWire screen sharing requires compositor portal handoff
+       (xdg-desktop-portal). Providing a placeholder screen request signals the portal integration to prompt the user. */
     if (onWayland) {
       console.log('screen sharing: handing the choice to the desktop portal');
       callback({ video: { id: 'screen:0:0', name: 'Entire screen' } });
@@ -3674,7 +3786,7 @@ const wireScreenSharing = ses => {
       const parentWin = (win && !win.isDestroyed()) ? win : null;
 
       const sources = await Promise.race([
-        desktopCapturer.getSources({ types: ['screen', 'window'], fetchWindowIcons: false }),
+        desktopCapturer.getSources({ types: ['screen', 'window'], fetchWindowIcons: true }),
         new Promise(resolve => setTimeout(() => resolve(null), 5000)),
       ]);
 
@@ -3684,36 +3796,13 @@ const wireScreenSharing = ses => {
         return;
       }
 
-      // Present actual screen & window sources to user with real picker
-      const available = sources.slice(0, 4);
-      const buttons = available.map(s => s.name || s.id);
-      buttons.push('Cancel');
-      const cancelId = buttons.length - 1;
-
-      let choice = -1;
-      try {
-        choice = dialog.showMessageBoxSync(parentWin, {
-          type: 'question',
-          buttons,
-          defaultId: 0,
-          cancelId,
-          title: 'Share Your Screen',
-          message: 'WhatsApp Web is requesting to share your screen or a window.',
-          detail: 'Select the screen or window you want to share:',
-          noLink: true,
-        });
-      } catch (e) {
-        console.warn('screen sharing dialog failed:', e.message);
-        choice = cancelId; // Fail-closed on dialog failure
-      }
-
-      if (choice < 0 || choice >= available.length || choice === cancelId) {
+      const selectedSource = await pickScreenSource(parentWin, sources);
+      if (!selectedSource) {
         console.log('screen sharing: declined or cancelled by user');
         callback({ video: null });
         return;
       }
 
-      const selectedSource = available[choice];
       console.log('screen sharing: user selected "%s"', selectedSource.name);
       callback({ video: selectedSource });
     } catch (err) {

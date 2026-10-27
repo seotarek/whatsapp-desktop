@@ -218,7 +218,7 @@ class Config {
   /* Only what the client itself decides is written back -- the window size and
      the zoom level. A hand-written config keeps its comments and its layout,
      because the file is rewritten from the values it already held plus these. */
-  save() {
+  save(options = {}) {
     const v = this.values;
     const text = [
       '# whatsapp-desktop -- every key is optional; delete one to get the default back.',
@@ -391,8 +391,13 @@ class Config {
     try {
       fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
       fs.writeFileSync(CONFIG_PATH, text);
+      return true;
     } catch (e) {
       console.warn('could not write %s: %s', CONFIG_PATH, e.message);
+      if (options && options.throwOnError === true) {
+        throw new Error(`Could not write config file ${CONFIG_PATH}: ${e.message}`);
+      }
+      return false;
     }
   }
 }

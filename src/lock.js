@@ -70,14 +70,31 @@ class LockManager {
     const clean = newPin.trim();
     const salt = generateSalt();
     const derived = deriveHash(clean, salt);
-    saveSecurityState(salt, derived);
-    this.salt = salt;
-    this.hash = derived;
-    this.config.set('lock.enabled', true);
-    this.config.save();
-    this.failedAttempts = 0;
-    this.isLocked = false;
-    return true;
+
+    const prevSalt = this.salt;
+    const prevHash = this.hash;
+    const prevEnabled = this.config.get('lock.enabled');
+
+    try {
+      saveSecurityState(salt, derived);
+      this.salt = salt;
+      this.hash = derived;
+      this.config.set('lock.enabled', true);
+      this.config.save({ throwOnError: true });
+      this.failedAttempts = 0;
+      this.isLocked = false;
+      return true;
+    } catch (err) {
+      if (prevSalt && prevHash) {
+        try { saveSecurityState(prevSalt, prevHash); } catch (_) {}
+      } else {
+        try { removeSecurityFile(); } catch (_) {}
+      }
+      this.salt = prevSalt;
+      this.hash = prevHash;
+      this.config.set('lock.enabled', prevEnabled);
+      throw new Error(`Failed to persist lock configuration: ${err.message}`);
+    }
   }
 
   removePasscode(currentPin) {
@@ -89,13 +106,28 @@ class LockManager {
     if (!this.verify(currentPin)) {
       throw new Error('Incorrect passcode');
     }
-    removeSecurityFile();
-    this.salt = null;
-    this.hash = null;
-    this.config.set('lock.enabled', false);
-    this.config.save();
-    this.isLocked = false;
-    return true;
+
+    const prevSalt = this.salt;
+    const prevHash = this.hash;
+    const prevEnabled = this.config.get('lock.enabled');
+
+    try {
+      removeSecurityFile();
+      this.salt = null;
+      this.hash = null;
+      this.config.set('lock.enabled', false);
+      this.config.save({ throwOnError: true });
+      this.isLocked = false;
+      return true;
+    } catch (err) {
+      if (prevSalt && prevHash) {
+        try { saveSecurityState(prevSalt, prevHash); } catch (_) {}
+      }
+      this.salt = prevSalt;
+      this.hash = prevHash;
+      this.config.set('lock.enabled', prevEnabled);
+      throw new Error(`Failed to persist lock removal: ${err.message}`);
+    }
   }
 
   verify(pin) {

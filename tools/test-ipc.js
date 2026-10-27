@@ -407,30 +407,24 @@ async function run() {
 
   // 13. URL Origin & HTTPS Security Checks
   const secureScope = {};
-  const isWhatsAppSecureCode = mainSource.slice(
-    mainSource.indexOf('const isWhatsAppSecure ='),
-    mainSource.indexOf('const isWhatsAppWeb =')
-  );
   const isWhatsAppWebCode = mainSource.slice(
     mainSource.indexOf('const isWhatsAppWeb ='),
     mainSource.indexOf('const ALLOWED_EXTERNAL_PROTOCOLS =')
   );
-  vm.runInNewContext(isWhatsAppSecureCode + '\n' + isWhatsAppWebCode + '\nsecureScope.isWhatsAppSecure = isWhatsAppSecure; secureScope.isWhatsAppWeb = isWhatsAppWeb;', { URL, secureScope });
-  const { isWhatsAppSecure, isWhatsAppWeb } = secureScope;
-
-  check('isWhatsAppSecure accepts https://web.whatsapp.com/', isWhatsAppSecure('https://web.whatsapp.com/'));
-  check('isWhatsAppSecure accepts https://chat.whatsapp.com/invite', isWhatsAppSecure('https://chat.whatsapp.com/invite'));
-  check('isWhatsAppSecure rejects http://web.whatsapp.com/', !isWhatsAppSecure('http://web.whatsapp.com/'));
-  check('isWhatsAppSecure rejects blob: URL', !isWhatsAppSecure('blob:https://web.whatsapp.com/uuid'));
-  check('isWhatsAppSecure rejects data: URL', !isWhatsAppSecure('data:text/html,<h1>hack</h1>'));
-  check('isWhatsAppSecure rejects spoofed domain', !isWhatsAppSecure('https://web.whatsapp.com.attacker.com/'));
-  check('isWhatsAppSecure rejects non-string input', !isWhatsAppSecure(null) && !isWhatsAppSecure(undefined) && !isWhatsAppSecure(123));
+  vm.runInNewContext(isWhatsAppWebCode + '\nsecureScope.isWhatsAppWeb = isWhatsAppWeb;', { URL, secureScope });
+  const { isWhatsAppWeb } = secureScope;
 
   check('isWhatsAppWeb accepts https://web.whatsapp.com/', isWhatsAppWeb('https://web.whatsapp.com/'));
+  check('isWhatsAppWeb accepts https://web.whatsapp.com:443/', isWhatsAppWeb('https://web.whatsapp.com:443/'));
   check('isWhatsAppWeb rejects http://web.whatsapp.com/', !isWhatsAppWeb('http://web.whatsapp.com/'));
+  check('isWhatsAppWeb rejects non-default port 8080', !isWhatsAppWeb('https://web.whatsapp.com:8080/'));
+  check('isWhatsAppWeb rejects embedded credentials', !isWhatsAppWeb('https://user:pass@web.whatsapp.com/'));
   check('isWhatsAppWeb rejects subdomains like faq.whatsapp.com', !isWhatsAppWeb('https://faq.whatsapp.com/'));
   check('isWhatsAppWeb rejects chat.whatsapp.com', !isWhatsAppWeb('https://chat.whatsapp.com/'));
-  check('isWhatsAppWeb rejects non-string input', !isWhatsAppWeb(null) && !isWhatsAppWeb(undefined));
+  check('isWhatsAppWeb rejects blob: URL', !isWhatsAppWeb('blob:https://web.whatsapp.com/uuid'));
+  check('isWhatsAppWeb rejects data: URL', !isWhatsAppWeb('data:text/html,<h1>hack</h1>'));
+  check('isWhatsAppWeb rejects spoofed domain', !isWhatsAppWeb('https://web.whatsapp.com.attacker.com/'));
+  check('isWhatsAppWeb rejects non-string input', !isWhatsAppWeb(null) && !isWhatsAppWeb(undefined) && !isWhatsAppWeb(123));
 
   console.log('\nipc security checks pass');
   if (failures > 0) process.exit(1);

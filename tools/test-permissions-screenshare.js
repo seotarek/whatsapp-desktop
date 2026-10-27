@@ -58,12 +58,8 @@ const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = fals
   const win = { isDestroyed: () => false };
 
   const startPerm = mainSource.indexOf("const ALLOWED_PERMISSIONS =");
-  const endPerm = mainSource.indexOf("\n};\n\nconst wireScreenSharing =", startPerm);
-  const permSnippet = mainSource.slice(startPerm, endPerm + 3);
-
-  const startScreen = mainSource.indexOf("const wireScreenSharing =");
-  const endScreen = mainSource.indexOf("\n};\n\n/* WhatsApp Web keys", startScreen);
-  const screenSnippet = mainSource.slice(startScreen, endScreen + 3);
+  const endScreen = mainSource.indexOf("\n};\n\n/* WhatsApp Web keys", startPerm);
+  const codeSnippet = mainSource.slice(startPerm, endScreen + 3);
 
   const isWhatsAppWebSnippet = mainSource.slice(
     mainSource.indexOf("const isWhatsAppWeb ="),
@@ -80,12 +76,16 @@ const setupHarness = ({ onWayland = false, dialogChoice = 0, dialogThrows = fals
     console: { log: () => {}, warn: () => {} },
     Promise,
     setTimeout,
+    BrowserWindow: undefined,
+    nativeTheme: { shouldUseDarkColors: true },
+    ipcMain: { on: () => {}, removeListener: () => {} },
+    path: require('path'),
+    __dirname: path.join(__dirname, '../src'),
   };
 
   vm.runInNewContext(
     isWhatsAppWebSnippet + "\n" +
-    permSnippet + "\n" +
-    screenSnippet + "\n" +
+    codeSnippet + "\n" +
     "wirePermissions(ses);\n" +
     "wireScreenSharing(ses);\n",
     context
@@ -179,12 +179,20 @@ async function run() {
   );
 
   /* ------------------------------------------------ Device Permission Handler */
-  check("device permission approved for web.whatsapp.com",
-    h1.checkDevice({ origin: "https://web.whatsapp.com" }) === true
+  check("device permission rejected for USB devices (default-deny)",
+    h1.checkDevice({ deviceType: "usb", origin: "https://web.whatsapp.com" }) === false
   );
-  check("device permission rejected for http or foreign domain",
-    h1.checkDevice({ origin: "http://web.whatsapp.com" }) === false &&
-    h1.checkDevice({ origin: "https://evil.com" }) === false
+  check("device permission rejected for HID devices (default-deny)",
+    h1.checkDevice({ deviceType: "hid", origin: "https://web.whatsapp.com" }) === false
+  );
+  check("device permission rejected for Serial devices (default-deny)",
+    h1.checkDevice({ deviceType: "serial", origin: "https://web.whatsapp.com" }) === false
+  );
+  check("device permission rejected for Bluetooth devices (default-deny)",
+    h1.checkDevice({ deviceType: "bluetooth", origin: "https://web.whatsapp.com" }) === false
+  );
+  check("device permission rejected by default even for whatsapp origin",
+    h1.checkDevice({ origin: "https://web.whatsapp.com" }) === false
   );
 
   /* ------------------------------------------------ Screen Sharing Handler (X11) */
@@ -227,8 +235,32 @@ async function run() {
     hX11Confirm.getDialogOptions()?.buttons.includes("Cancel") &&
     hX11Confirm.getDialogOptions()?.buttons.includes("Secondary Screen (Display 2)")
   );
+  check("screenshare dialog sets Cancel as defaultId and cancelId",
+    hX11Confirm.getDialogOptions()?.defaultId === hX11Confirm.getDialogOptions()?.cancelId &&
+    hX11Confirm.getDialogOptions()?.buttons[hX11Confirm.getDialogOptions()?.defaultId] === "Cancel"
+  );
   check("screenshare returns selected source when user picks choice",
     shareResult.video && shareResult.video.id === "screen:1:0"
+  );
+
+  // Check all sources without 4-source cap
+  const sixSources = [
+    { id: "screen:0", name: "Screen 0" },
+    { id: "screen:1", name: "Screen 1" },
+    { id: "window:1", name: "Win 1" },
+    { id: "window:2", name: "Win 2" },
+    { id: "window:3", name: "Win 3" },
+    { id: "window:4", name: "Win 4" },
+  ];
+  const hX11AllSources = setupHarness({ onWayland: false, dialogChoice: 6, sources: sixSources });
+  await hX11AllSources.requestScreenShare({
+    securityOrigin: "https://web.whatsapp.com",
+    userGesture: true,
+    frame: { parent: null },
+  });
+  check("screenshare dialog presents all sources without 4-source cap",
+    hX11AllSources.getDialogOptions()?.buttons.length === 7 &&
+    hX11AllSources.getDialogOptions()?.buttons.includes("Win 4")
   );
 
   // 5. User cancels or declines

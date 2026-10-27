@@ -37,7 +37,13 @@ const fake = (values = {}) => ({
   d: { ...values },
   get(k) { return this.d[k]; },
   set(k, v) { this.d[k] = v; },
-  save() {},
+  save(options) {
+    if (this.failSave) {
+      if (options && options.throwOnError) throw new Error('Simulated config write failure');
+      return false;
+    }
+    return true;
+  },
 });
 
 /* With no passcode set there is nothing to ask, and nothing may be in the way. */
@@ -178,6 +184,38 @@ locked = false;
 banners.show({ key: 'Ahmed', title: 'Ahmed', body: 'readable again' });
 check('unlocking lets the next one through again',
       raised[raised.length - 1].body, 'readable again');
+
+/* Config persistence failure & atomic rollback */
+const failingConfig = fake();
+failingConfig.failSave = true;
+const failLock = new LockManager(failingConfig);
+
+let threwOnSet = false;
+try {
+  failLock.setPasscode('secret123');
+} catch (e) {
+  threwOnSet = e.message.includes('Failed to persist lock configuration');
+}
+check('setPasscode throws when config save fails', threwOnSet, true);
+check('lock state rolled back after failed setPasscode', failLock.hasPasscode(), false);
+check('lock.enabled not set after failed setPasscode', failingConfig.get('lock.enabled'), undefined);
+
+// Now set with working config, then test remove failure rollback
+const workingConfig = fake();
+const rollbackLock = new LockManager(workingConfig);
+rollbackLock.setPasscode('secret123');
+check('passcode set with working config', rollbackLock.hasPasscode(), true);
+
+workingConfig.failSave = true;
+let threwOnRemove = false;
+try {
+  rollbackLock.removePasscode('secret123');
+} catch (e) {
+  threwOnRemove = e.message.includes('Failed to persist lock removal');
+}
+check('removePasscode throws when config save fails', threwOnRemove, true);
+check('lock state retained after failed removePasscode', rollbackLock.hasPasscode(), true);
+check('lock.enabled remains true after failed removePasscode', workingConfig.get('lock.enabled'), true);
 
 fs.rmSync(sandbox, { recursive: true, force: true });
 
