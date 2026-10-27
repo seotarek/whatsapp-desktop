@@ -15,6 +15,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
+const { EventEmitter } = require('events');
 
 /* Its own config directory, so running the tests never touches the one the
    client on this machine is using. The version this came from wrote a real
@@ -396,6 +398,175 @@ check('launch3 accepts original passcode', launch3.verify('persist-across-launch
 launch3.removePasscode('persist-across-launches');
 check('clean removal removes credentials', launch3.hasPasscode(), false);
 check('security.json removed after removePasscode', fs.existsSync(storage.SECURITY_PATH), false);
+
+/* -------------------------------------------------- lock window lifecycle tests */
+
+const mainSource = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
+const startOpenLock = mainSource.indexOf('const openLock =');
+const endLockTimer = mainSource.indexOf('const startLockTimer =', startOpenLock);
+if (startOpenLock < 0 || endLockTimer < 0) {
+  throw new Error('Could not find lock controller in main.js');
+}
+const lockControllerCode = mainSource.slice(startOpenLock, endLockTimer);
+
+class MockBrowserWindow extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.options = options;
+    this.destroyed = false;
+    this.focused = false;
+    this.bounds = options.x !== undefined
+      ? { x: options.x, y: options.y, width: options.width, height: options.height }
+      : { x: 0, y: 0, width: 800, height: 600 };
+    this.webContents = new EventEmitter();
+    this.loadedFile = null;
+  }
+  loadFile(file) { this.loadedFile = file; }
+  getBounds() { return this.bounds; }
+  setBounds(b) { this.bounds = b; }
+  focus() { this.focused = true; }
+  isDestroyed() { return this.destroyed; }
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.emit('closed');
+  }
+  close() {
+    const event = {
+      defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; },
+    };
+    this.emit('close', event);
+    if (!event.defaultPrevented) {
+      this.destroy();
+    }
+    return !event.defaultPrevented;
+  }
+}
+
+const createLockHarness = (lockInstance) => {
+  let lockWin = null;
+  let quitting = false;
+  const mockWin = new MockBrowserWindow();
+
+  const sandboxContext = vm.createContext({
+    win: mockWin,
+    lock: lockInstance,
+    get lockWin() { return lockWin; },
+    set lockWin(v) { lockWin = v; },
+    get quitting() { return quitting; },
+    set quitting(v) { quitting = v; },
+    BrowserWindow: MockBrowserWindow,
+    path,
+    __dirname: path.join(__dirname, '../src'),
+    console: { log() {}, warn() {} },
+    quit: () => { quitting = true; },
+  });
+
+  vm.runInContext(
+    lockControllerCode +
+    '\n' +
+    'globalThis.controls = {\n' +
+    '  openLock,\n' +
+    '  lockApp,\n' +
+    '  unlockApp,\n' +
+    '  getLockWin: () => lockWin,\n' +
+    '  setQuitting: (v) => { quitting = v; },\n' +
+    '  getQuitting: () => quitting,\n' +
+    '  win: win\n' +
+    '};',
+    sandboxContext,
+    { filename: 'main.js (lock controller)' }
+  );
+
+  return sandboxContext.controls;
+};
+
+/* Scenario 1: Protective lockdown (Corrupted / Unreadable credentials) */
+const protoLockCfg = fake({ 'lock.enabled': true });
+const protoLock = new LockManager(protoLockCfg);
+protoLock.isLocked = true;
+protoLock.isCorrupted = true;
+const corruptControls = createLockHarness(protoLock);
+
+const cWin1 = corruptControls.openLock();
+check('protective lockdown: lock window is opened', !!cWin1, true);
+check('protective lockdown: lock window is modal over main window', cWin1.options.modal, true);
+check('protective lockdown: lock window parent is main window', cWin1.options.parent === corruptControls.win, true);
+
+const cCloseSuccess = cWin1.close();
+check('protective lockdown: close event on lock window is prevented', cCloseSuccess, false);
+check('protective lockdown: lock window is NOT destroyed after close attempt', cWin1.isDestroyed(), false);
+check('protective lockdown: lock window retains focus after close attempt', cWin1.focused, true);
+
+const cLockAppResult = corruptControls.lockApp('scheduled check');
+check('protective lockdown: lockApp returns true even with no passcode in memory', cLockAppResult, true);
+
+cWin1.destroy();
+check('protective lockdown: initial lockWin destroyed by external event', cWin1.isDestroyed(), true);
+const cWin2 = corruptControls.getLockWin();
+check('protective lockdown: unexpected close immediately re-covers with new window', !!cWin2 && !cWin2.isDestroyed() && cWin2 !== cWin1, true);
+
+/* Scenario 2: Valid passcode locked state */
+const validCfg = fake();
+const validLock = new LockManager(validCfg);
+validLock.setPasscode('correct-pin');
+validLock.isLocked = true;
+const validControls = createLockHarness(validLock);
+
+const vWin1 = validControls.openLock();
+check('valid passcode: lock window is opened', !!vWin1, true);
+const vCloseSuccess = vWin1.close();
+check('valid passcode: close event on lock window is prevented', vCloseSuccess, false);
+check('valid passcode: lock window remains intact after close attempt', vWin1.isDestroyed(), false);
+
+const vLockAppResult = validControls.lockApp('system lock');
+check('valid passcode: lockApp returns true while locked', vLockAppResult, true);
+
+vWin1.destroy();
+const vWin2 = validControls.getLockWin();
+check('valid passcode: unexpected destroy immediately re-covers', !!vWin2 && !vWin2.isDestroyed() && vWin2 !== vWin1, true);
+
+// Legitimate unlock
+validLock.verify('correct-pin');
+check('valid passcode: verified unlocks state', validLock.isLocked, false);
+validControls.unlockApp();
+check('valid passcode: unlockApp destroys lock window', vWin2.isDestroyed(), true);
+check('valid passcode: lock window is NOT re-opened after legitimate unlock', validControls.getLockWin(), null);
+validLock.removePasscode('correct-pin');
+
+/* Scenario 3: Intentional Application Quit */
+const quitCfg = fake();
+const quitLock = new LockManager(quitCfg);
+quitLock.setPasscode('quit-pin');
+quitLock.isLocked = true;
+const quitControls = createLockHarness(quitLock);
+
+const qWin = quitControls.openLock();
+check('quit scenario: lock window opened', !!qWin, true);
+quitControls.setQuitting(true);
+const qCloseSuccess = qWin.close();
+check('quit scenario: close event is allowed when quitting', qCloseSuccess, true);
+check('quit scenario: lock window is destroyed when quitting', qWin.isDestroyed(), true);
+check('quit scenario: lock window does NOT re-open when quitting', quitControls.getLockWin(), null);
+quitLock.removePasscode('quit-pin');
+
+/* Scenario 4: Parent window focus redirection */
+const focusCfg = fake();
+const focusLock = new LockManager(focusCfg);
+focusLock.setPasscode('focus-pin');
+focusLock.isLocked = true;
+let lockWinRef = null;
+const mockMainWin = new MockBrowserWindow();
+mockMainWin.on('focus', () => {
+  if (focusLock.isLocked || focusLock.isCorrupted) {
+    if (lockWinRef && !lockWinRef.isDestroyed()) lockWinRef.focus();
+  }
+});
+lockWinRef = new MockBrowserWindow();
+mockMainWin.emit('focus');
+check('main window focus redirects to lock window while locked', lockWinRef.focused, true);
+focusLock.removePasscode('focus-pin');
 
 fs.rmSync(sandbox, { recursive: true, force: true });
 

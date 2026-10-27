@@ -1583,6 +1583,13 @@ const createWindow = () => {
 
   for (const event of ['show', 'hide', 'focus', 'blur', 'restore']) win.on(event, pushFocus);
 
+  win.on('focus', () => {
+    if (lock.isLocked || lock.isCorrupted) {
+      if (lockWin && !lockWin.isDestroyed()) lockWin.focus();
+      else openLock();
+    }
+  });
+
   traceWindowState();
 
   win.once('ready-to-show', () => {
@@ -2390,7 +2397,18 @@ const openLock = () => {
     },
   });
   lockWin.loadFile(path.join(__dirname, 'lock.html'));
-  lockWin.on('closed', () => { lockWin = null; });
+
+  /* Prevent closing the lock window while the app is locked.
+     Only allow closing when the app is intentionally quitting. */
+  lockWin.on('close', event => {
+    if (quitting) return;
+    if (lock.isLocked || lock.isCorrupted) {
+      event.preventDefault();
+      if (lockWin && !lockWin.isDestroyed()) {
+        lockWin.focus();
+      }
+    }
+  });
 
   /* The parent can still be moved and resized by the compositor -- tiled by a
      keybinding, moved to another output -- and the cover has to go with it, or
@@ -2401,19 +2419,49 @@ const openLock = () => {
   };
   win.on('move', follow);
   win.on('resize', follow);
+
+  /* Clean up listeners and ensure fail-closed coverage if destroyed unexpectedly */
   lockWin.on('closed', () => {
+    lockWin = null;
     if (win && !win.isDestroyed()) {
       win.removeListener('move', follow);
       win.removeListener('resize', follow);
     }
+    /* If the lock window was closed or destroyed unexpectedly while the app
+       remains locked, immediately re-open it so WhatsApp is never exposed. */
+    if (!quitting && (lock.isLocked || lock.isCorrupted)) {
+      openLock();
+    }
   });
+
+  /* Allow the user to intentionally quit the application via Ctrl+Q
+     even from the lock screen. */
+  if (lockWin.webContents) {
+    lockWin.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return;
+      const ctrl = input.control || input.meta;
+      const key = input.key ? input.key.toLowerCase() : '';
+      if (ctrl && key === 'q') {
+        event.preventDefault();
+        quit();
+      }
+    });
+  }
 
   return lockWin;
 };
 
 const lockApp = why => {
-  if (!lock.hasPasscode()) return false;
-  if (lock.isLocked) return true;
+  if (!lock.isEnabled() && !lock.isLocked) return false;
+  if (lock.isLocked || lock.isCorrupted) {
+    if (!lockWin || lockWin.isDestroyed()) {
+      openLock();
+      console.log('lock: covered (%s)', why);
+    } else {
+      lockWin.focus();
+    }
+    return true;
+  }
   lock.lock();
   openLock();
   console.log('lock: covered (%s)', why);
@@ -2421,6 +2469,7 @@ const lockApp = why => {
 };
 
 const unlockApp = () => {
+  if (lock.isCorrupted) return;
   if (lockWin && !lockWin.isDestroyed()) lockWin.destroy();
   lockWin = null;
   lock.recordActivity();
