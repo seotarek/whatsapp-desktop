@@ -25,6 +25,7 @@ const storage = require('../src/lock/storage.js');
 app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-dev-shm-usage');
+app.commandLine.appendSwitch('ozone-platform', 'headless');
 
 let failures = 0;
 const check = (label, ok, details = '') => {
