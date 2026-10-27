@@ -81,6 +81,7 @@ check('the same passcode under two salts does not hash the same',
       deriveHash('open sesame', saltA) === deriveHash('open sesame', saltB), false);
 check('and the hash that is stored is what the right passcode derives to',
       deriveHash('open sesame', onDisk.salt), onDisk.hash);
+lock.removePasscode('open sesame');
 
 /* Wrong answers, and the wait that follows enough of them. */
 const guessed = new LockManager(fake());
@@ -92,7 +93,6 @@ check('five wrong answers buy a wait', (() => {
 
 /* Taking it off again. */
 const removing = new LockManager(fake());
-removing.setPasscode('1234');
 check('the passcode cannot be removed by someone who does not know it', (() => {
   try { removing.removePasscode('9999'); return 'removed'; } catch (e) { return 'refused'; }
 })(), 'refused');
@@ -110,7 +110,19 @@ check(
   removing.hasPasscode(),
   true
 );
-removing.removePasscode('1234');
+
+/* Changing an existing passcode requires authenticating with the current one. */
+check('passcode cannot be changed without current passcode', (() => {
+  try { removing.setPasscode('5678'); return 'changed'; } catch (e) { return 'refused'; }
+})(), 'refused');
+check('passcode cannot be changed with wrong current passcode', (() => {
+  try { removing.setPasscode('5678', '9999'); return 'changed'; } catch (e) { return 'refused'; }
+})(), 'refused');
+check('passcode can be changed with correct current passcode', (() => {
+  try { removing.setPasscode('5678', '1234'); return removing.verify('5678'); } catch (e) { return false; }
+})(), true);
+
+removing.removePasscode('5678');
 check('and it can by someone who does', removing.hasPasscode(), false);
 
 /*

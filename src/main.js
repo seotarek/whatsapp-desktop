@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const { app, BrowserWindow, Menu, clipboard, session, shell, nativeTheme, ipcMain, globalShortcut, powerMonitor, screen: electronScreen, desktopCapturer } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, session, shell, nativeTheme, ipcMain, globalShortcut, powerMonitor, screen: electronScreen, desktopCapturer, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -927,6 +927,7 @@ const setAutostart = enable => {
    rig asks for it directly, so both go the same way through the same redraws --
    which is what makes a switch testable without a mouse. */
 const changeSetting = (key, value) => {
+  if (key === 'lock.enabled') return { ok: false, why: 'lock.enabled is managed by lock manager' };
   config.set(key, value);
   config.save();
   if (key === 'view.zoom' && win && !win.isDestroyed()) {
@@ -1169,7 +1170,7 @@ const SITES = {
 const openSite = where => {
   const url = SITES[where] || SITES.site;
   console.log('opening %s', url);
-  shell.openExternal(url).catch(e => console.warn('could not open %s: %s', url, e.message));
+  safeOpenExternal(url).catch(e => console.warn('could not open %s: %s', url, e.message));
 };
 
 /* Set when the About window is opened by the tray's "Check for Updates", and
@@ -1674,7 +1675,7 @@ const createWindow = () => {
      * for the day some navigation does come through. */
     const link = isOwnPage(url) ? null : links.from(url);
     if (link) { event.preventDefault(); openLink(link, 'a link in the page'); return; }
-    if (isWhatsApp(url)) return;
+    if (isWhatsAppSecure(url)) return;
     event.preventDefault();
     openExternally(url);
   });
@@ -1694,20 +1695,54 @@ const isWhatsApp = url => {
   }
 };
 
-/* Narrower than isWhatsApp, and deliberately so. faq.whatsapp.com is WhatsApp
-   as well, and it is still a page for a browser rather than for a window of
-   this client's: there is no address bar here and no way back. What this answers
-   true for is the client itself, and the URLs a page of it opens that carry no
-   origin of their own. */
-const isOwnPage = url => {
-  if (!url) return true;
-  if (url.startsWith('blob:') || url.startsWith('data:') || url.startsWith('about:')) return true;
+const isWhatsAppSecure = url => {
+  if (!url || typeof url !== 'string') return false;
   try {
-    return new URL(url).hostname === 'web.whatsapp.com';
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname;
+    return host === 'web.whatsapp.com' || host === 'whatsapp.com' || host.endsWith('.whatsapp.com');
   } catch (e) {
     return false;
   }
 };
+
+/* Narrower than isWhatsApp, and deliberately so. faq.whatsapp.com is WhatsApp
+   as well, and it is still a page for a browser rather than for a window of
+   this client's: there is no address bar here and no way back. What this answers
+   true for is the client itself via secure HTTPS only. */
+const isOwnPage = url => {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && parsed.hostname === 'web.whatsapp.com';
+  } catch (e) {
+    return false;
+  }
+};
+
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'http:', 'mailto:', 'tel:']);
+
+async function safeOpenExternal(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const parsed = new URL(rawUrl);
+    if (!ALLOWED_EXTERNAL_PROTOCOLS.has(parsed.protocol)) {
+      console.warn('security: blocked opening external URL with disallowed protocol: %s', parsed.protocol);
+      return false;
+    }
+    const link = links.from(rawUrl);
+    if (link) {
+      openLink(link, 'a link in the page');
+      return true;
+    }
+    await shell.openExternal(rawUrl);
+    return true;
+  } catch (err) {
+    console.warn('security: invalid URL for safeOpenExternal (%s): %s', rawUrl, err.message);
+    return false;
+  }
+}
 
 /*
  * A link this client is not showing, handed to whatever does show it -- with one
@@ -1717,9 +1752,7 @@ const isOwnPage = url => {
  * See src/links.js.
  */
 const openExternally = url => {
-  const link = links.from(url);
-  if (link) { openLink(link, 'a link in the page'); return; }
-  if (/^https?:|^mailto:|^tel:/i.test(url)) shell.openExternal(url).catch(() => {});
+  safeOpenExternal(url).catch(() => {});
 };
 
 /* A chat asked for before there was a page to ask, and the message that came
@@ -1895,7 +1928,7 @@ const showContextMenu = (contents, params) => {
   if (params.linkURL) {
     rule();
     template.push(
-      { label: 'Open link in browser', click: () => shell.openExternal(params.linkURL) },
+      { label: 'Open link in browser', click: () => safeOpenExternal(params.linkURL) },
       { label: 'Copy link', click: () => clipboard.writeText(params.linkURL) },
     );
   }
@@ -1944,7 +1977,7 @@ const adoptPopup = popup => {
   });
 
   contents.on('will-navigate', (event, url) => {
-    if (isWhatsApp(url)) return;
+    if (isWhatsAppSecure(url)) return;
     event.preventDefault();
     openExternally(url);
   });
@@ -2769,13 +2802,20 @@ const wireIpc = () => {
     };
   });
 
-  ipcMain.handle('lock:set-passcode', (event, passcode) => {
+  ipcMain.handle('lock:set-passcode', (event, passcode, currentPasscode) => {
     if (!isSettingsOrFonts(event)) return { ok: false, why: 'unauthorized' };
     if (typeof passcode !== 'string' || passcode.length < 4 || passcode.length > 64) {
       return { ok: false, why: 'invalid passcode format' };
     }
-    try { lock.setPasscode(passcode); return { ok: true }; }
-    catch (err) { return { ok: false, why: err.message }; }
+    if (currentPasscode !== undefined && (typeof currentPasscode !== 'string' || currentPasscode.length > 64)) {
+      return { ok: false, why: 'invalid current passcode format' };
+    }
+    try {
+      lock.setPasscode(passcode, currentPasscode);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, why: err.message };
+    }
   });
 
   ipcMain.handle('lock:remove-passcode', (event, passcode) => {
@@ -2880,9 +2920,27 @@ const wireIpc = () => {
 
   ipcMain.handle('settings:set', (event, key, value) => {
     if (!isSettingsOrFonts(event) || typeof key !== 'string' || key.length > 64) return { ok: false };
-    const allowed = ['fonts.', 'view.', 'behaviour.', 'notifications.', 'privacy.', 'system.', 'lock.'];
-    if (!allowed.some(ns => key.startsWith(ns))) {
-      return { ok: false, why: 'unsupported setting key' };
+    if (key.startsWith('lock.')) {
+      if (key !== 'lock.timeout' && key !== 'lock.on-system-lock') {
+        return { ok: false, why: 'unsupported or protected setting key' };
+      }
+      if (key === 'lock.timeout') {
+        const num = Number(value);
+        if (!Number.isInteger(num) || num <= 0 || num > 1440) {
+          return { ok: false, why: 'invalid lock timeout' };
+        }
+        value = num;
+      }
+      if (key === 'lock.on-system-lock') {
+        if (typeof value !== 'boolean') {
+          return { ok: false, why: 'invalid on-system-lock value' };
+        }
+      }
+    } else {
+      const allowed = ['fonts.', 'view.', 'behaviour.', 'notifications.', 'privacy.', 'system.'];
+      if (!allowed.some(ns => key.startsWith(ns))) {
+        return { ok: false, why: 'unsupported setting key' };
+      }
     }
     return changeSetting(key, value);
   });
@@ -3543,76 +3601,94 @@ const ALLOWED_PERMISSIONS = new Set([
   'clipboard-read', 'clipboard-sanitized-write', 'fullscreen', 'display-capture',
   'speaker-selection', 'mediaKeySystem', 'idle-detection', 'window-management',
 ]);
+const SENSITIVE_PERMISSIONS = new Set([
+  'media', 'audioCapture', 'videoCapture', 'display-capture', 'clipboard-read',
+]);
 
 const wirePermissions = ses => {
-  /* The origin is checked as well as the permission, and the check is written to
-     survive not being told one. Chromium hands over an empty requestingUrl for
-     the media request a call starts with, and an earlier version of this read
-     that as "not WhatsApp" and refused the camera -- which is why the check was
-     taken out altogether. It is back, with isWhatsApp answering true for the
-     empty, blob: and about: URLs that are this window's own. Without it, an
-     <iframe> of somebody else's making asks for the microphone and is given
-     it. */
   ses.setPermissionRequestHandler((contents, permission, callback, details) => {
-    const url = (details && details.requestingUrl) || (contents && contents.getURL()) || '';
-    callback(isWhatsApp(url) && ALLOWED_PERMISSIONS.has(permission));
+    if (!ALLOWED_PERMISSIONS.has(permission)) {
+      callback(false);
+      return;
+    }
+    const requestingUrl = (details && details.requestingUrl) || '';
+    const isMainFrame = details ? (details.isMainFrame || !details.frame || !details.frame.parent) : true;
+    const documentUrl = (contents && contents.getURL()) || '';
+
+    // Sensitive permissions require top-level main frame AND secure WhatsApp origin
+    if (SENSITIVE_PERMISSIONS.has(permission)) {
+      if (!isMainFrame || !isWhatsAppSecure(documentUrl)) {
+        console.warn('security: blocked sensitive permission "%s" for non-top or insecure frame: %s', permission, requestingUrl || documentUrl);
+        callback(false);
+        return;
+      }
+      if (requestingUrl && !requestingUrl.startsWith('blob:') && !requestingUrl.startsWith('data:') && !requestingUrl.startsWith('about:')) {
+        if (!isWhatsAppSecure(requestingUrl)) {
+          console.warn('security: blocked sensitive permission "%s" for foreign requestingUrl: %s', permission, requestingUrl);
+          callback(false);
+          return;
+        }
+      }
+      callback(true);
+      return;
+    }
+
+    const checkUrl = requestingUrl || documentUrl;
+    callback(isWhatsAppSecure(checkUrl));
   });
-  ses.setPermissionCheckHandler((contents, permission, origin, details) =>
-    isWhatsApp(origin || '') && ALLOWED_PERMISSIONS.has(permission));
-  /* This one is not about the camera. It decides which USB, HID and serial
-     devices a page may open, and WhatsApp Web asks for none of them -- so the
-     answer is scoped to the one origin this window shows rather than left as a
-     blanket yes to anything that finds its way into it. */
+
+  ses.setPermissionCheckHandler((contents, permission, origin, details) => {
+    if (!ALLOWED_PERMISSIONS.has(permission)) return false;
+    const isMainFrame = details ? (details.isMainFrame || !details.frame || !details.frame.parent) : true;
+    if (SENSITIVE_PERMISSIONS.has(permission) && !isMainFrame) return false;
+    return isWhatsAppSecure(origin || (contents && contents.getURL()) || '');
+  });
+
   ses.setDevicePermissionHandler(details =>
-    isWhatsApp((details && details.origin) || ''));
+    isWhatsAppSecure((details && details.origin) || ''));
 };
 
-/* Screen sharing during calls. WhatsApp Web calls getDisplayMedia() when the user
-   presses the share-screen button in a call, and Electron does not forward that to
-   the compositor on its own -- the page must ask the main process for a source, or
-   the request silently goes nowhere. The entire screen is handed over without a
-   picker: WhatsApp's own UI already tells the user what they are sharing, and a
-   system dialog on top of that would be a speed bump. PipeWire is the path it takes
-   on Wayland, and the WebRTCPipeWireCapturer flag in the switches above is what
-   enables that. */
 const wireScreenSharing = ses => {
-  /* Electron will not forward getDisplayMedia anywhere without a handler, so the
-     share-screen button in a call silently does nothing until one is set. What
-     the handler must never do is fail to answer: a callback that is not called
-     leaves the page waiting for ever, which looks exactly like a button that
-     does nothing -- the very thing this is here to fix.
-
-     useSystemPicker asks Chromium to run the platform's own chooser and skip
-     this handler entirely where it can. That is the right answer wherever it is
-     available, and the handler below is what happens where it is not. */
   ses.setDisplayMediaRequestHandler(async (request, callback) => {
-    /* Wayland picks in the compositor, not here.
-     *
-     * desktopCapturer.getSources() on a Wayland session goes out to
-     * xdg-desktop-portal and waits -- and measured on this session it never came
-     * back, for screens and for windows alike, with an eight second ceiling on
-     * the measurement. A handler built on it is a handler that never answers,
-     * which is how "screen sharing was added" and screen sharing did not work.
-     *
-     * There is nothing to enumerate anyway. Under WebRTCPipeWireCapturer the
-     * portal puts up its own chooser when the stream starts, and it is the only
-     * thing on a Wayland session allowed to say what may be captured. So the
-     * request is answered at once with the screen Chromium will hand to the
-     * portal, and the user picks in the dialog the compositor draws. */
+    const origin = (request && request.securityOrigin) || '';
+    const isTopFrame = request && request.frame ? !request.frame.parent : true;
+    if (!isTopFrame || !isWhatsAppSecure(origin)) {
+      console.warn('screen sharing: blocked request from non-top or insecure origin "%s"', origin);
+      callback({ video: null });
+      return;
+    }
+
     if (onWayland) {
       console.log('screen sharing: handing the choice to the desktop portal');
       callback({ video: { id: 'screen:0:0', name: 'Entire screen' } });
       return;
     }
 
-    /* X11, where enumeration is local and answers immediately. Windows as well
-       as screens: WhatsApp's own button offers both, and a handler that only
-       ever answers with a screen turns "share this window" into "share
-       everything", which is a privacy bug rather than a missing feature. */
     try {
+      const parentWin = (win && !win.isDestroyed()) ? win : null;
+      let confirmed = true;
+      try {
+        const choice = dialog.showMessageBoxSync(parentWin, {
+          type: 'question',
+          buttons: ['Share Screen', 'Cancel'],
+          defaultId: 0,
+          cancelId: 1,
+          title: 'Screen Sharing Request',
+          message: 'WhatsApp Web is requesting to share your screen.',
+          detail: 'Do you want to share your screen in this call?',
+          noLink: true,
+        });
+        confirmed = (choice === 0);
+      } catch (e) {}
+
+      if (!confirmed) {
+        console.log('screen sharing: declined by user');
+        callback({ video: null });
+        return;
+      }
+
       const sources = await Promise.race([
         desktopCapturer.getSources({ types: ['screen', 'window'], fetchWindowIcons: false }),
-        /* Belt and braces. Whatever else happens, this handler answers. */
         new Promise(resolve => setTimeout(() => resolve(null), 5000)),
       ]);
       if (!sources) {
@@ -3627,9 +3703,6 @@ const wireScreenSharing = ses => {
         return;
       }
       console.log('screen sharing: handing over "%s"', source.name);
-      /* No audio. `loopback` is the system-audio capture Electron implements on
-         Windows and nowhere else; passing it here is at best ignored, and the
-         microphone is already in the call. */
       callback({ video: source });
     } catch (err) {
       console.warn('screen sharing failed: %s', err.message);

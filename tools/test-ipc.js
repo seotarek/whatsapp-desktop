@@ -164,7 +164,12 @@ const setupRig = () => {
     lock: {
       verify: pass => pass === '1234',
       hasPasscode: () => true,
-      setPasscode: () => {},
+      setPasscode: (newPin, currentPin) => {
+        if (!currentPin || currentPin !== '1234') {
+          throw new Error('Current passcode is required to change passcode');
+        }
+        return true;
+      },
       removePasscode: () => {},
     },
     unlockApp: () => {},
@@ -285,6 +290,37 @@ async function run() {
     validKeyResult && validKeyResult.ok === true
   );
 
+  // 7b. Protection of lock settings via settings:set
+  const lockEnabledResult = await settingsSet(settingsEvent, 'lock.enabled', false);
+  check('settings:set rejects tampering with lock.enabled',
+    lockEnabledResult && lockEnabledResult.ok === false
+  );
+
+  const lockTimeoutResult = await settingsSet(settingsEvent, 'lock.timeout', 20);
+  check('settings:set accepts valid lock.timeout',
+    lockTimeoutResult && lockTimeoutResult.ok === true
+  );
+
+  const invalidTimeoutResult = await settingsSet(settingsEvent, 'lock.timeout', -5);
+  check('settings:set rejects invalid negative lock.timeout',
+    invalidTimeoutResult && invalidTimeoutResult.ok === false
+  );
+
+  const lockSystemResult = await settingsSet(settingsEvent, 'lock.on-system-lock', true);
+  check('settings:set accepts valid lock.on-system-lock',
+    lockSystemResult && lockSystemResult.ok === true
+  );
+
+  const invalidLockSystemResult = await settingsSet(settingsEvent, 'lock.on-system-lock', 'invalid');
+  check('settings:set rejects non-boolean lock.on-system-lock',
+    invalidLockSystemResult && invalidLockSystemResult.ok === false
+  );
+
+  const unknownLockKeyResult = await settingsSet(settingsEvent, 'lock.unknown_key', 'val');
+  check('settings:set rejects arbitrary keys under lock namespace',
+    unknownLockKeyResult && unknownLockKeyResult.ok === false
+  );
+
   // 8. WhatsApp Web attempting to unlock or modify lock
   const waUnlockResult = await lockUnlock(waEvent, '1234');
   check('lock:unlock rejects calls from https://web.whatsapp.com/',
@@ -294,6 +330,22 @@ async function run() {
   const waLockSetResult = await lockSet(waEvent, '9999');
   check('lock:set-passcode rejects calls from https://web.whatsapp.com/',
     waLockSetResult && waLockSetResult.ok === false
+  );
+
+  // 8b. Authenticated passcode changing
+  const lockSetNoCurrent = await lockSet(settingsEvent, '5678');
+  check('lock:set-passcode requires current passcode when lock is set',
+    lockSetNoCurrent && lockSetNoCurrent.ok === false
+  );
+
+  const lockSetWrongCurrent = await lockSet(settingsEvent, '5678', '9999');
+  check('lock:set-passcode rejects incorrect current passcode',
+    lockSetWrongCurrent && lockSetWrongCurrent.ok === false
+  );
+
+  const lockSetCorrectCurrent = await lockSet(settingsEvent, '5678', '1234');
+  check('lock:set-passcode succeeds with correct current passcode',
+    lockSetCorrectCurrent && lockSetCorrectCurrent.ok === true
   );
 
   // 9. Fail-closed on missing event or sender
@@ -347,6 +399,32 @@ async function run() {
     notificationsRaised === 10,
     `raised ${notificationsRaised} instead of 10`
   );
+
+  // 13. URL Origin & HTTPS Security Checks
+  const secureScope = {};
+  const isWhatsAppSecureCode = mainSource.slice(
+    mainSource.indexOf('const isWhatsAppSecure ='),
+    mainSource.indexOf('const isOwnPage =')
+  );
+  const isOwnPageCode = mainSource.slice(
+    mainSource.indexOf('const isOwnPage ='),
+    mainSource.indexOf('const ALLOWED_EXTERNAL_PROTOCOLS =')
+  );
+  vm.runInNewContext(isWhatsAppSecureCode + '\n' + isOwnPageCode + '\nsecureScope.isWhatsAppSecure = isWhatsAppSecure; secureScope.isOwnPage = isOwnPage;', { URL, secureScope });
+  const { isWhatsAppSecure, isOwnPage } = secureScope;
+
+  check('isWhatsAppSecure accepts https://web.whatsapp.com/', isWhatsAppSecure('https://web.whatsapp.com/'));
+  check('isWhatsAppSecure accepts https://chat.whatsapp.com/invite', isWhatsAppSecure('https://chat.whatsapp.com/invite'));
+  check('isWhatsAppSecure rejects http://web.whatsapp.com/', !isWhatsAppSecure('http://web.whatsapp.com/'));
+  check('isWhatsAppSecure rejects blob: URL', !isWhatsAppSecure('blob:https://web.whatsapp.com/uuid'));
+  check('isWhatsAppSecure rejects data: URL', !isWhatsAppSecure('data:text/html,<h1>hack</h1>'));
+  check('isWhatsAppSecure rejects spoofed domain', !isWhatsAppSecure('https://web.whatsapp.com.attacker.com/'));
+  check('isWhatsAppSecure rejects non-string input', !isWhatsAppSecure(null) && !isWhatsAppSecure(undefined) && !isWhatsAppSecure(123));
+
+  check('isOwnPage accepts https://web.whatsapp.com/', isOwnPage('https://web.whatsapp.com/'));
+  check('isOwnPage rejects http://web.whatsapp.com/', !isOwnPage('http://web.whatsapp.com/'));
+  check('isOwnPage rejects subdomains like faq.whatsapp.com', !isOwnPage('https://faq.whatsapp.com/'));
+  check('isOwnPage rejects non-string input', !isOwnPage(null) && !isOwnPage(undefined));
 
   console.log('\nipc security checks pass');
   if (failures > 0) process.exit(1);

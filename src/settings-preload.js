@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   cacheSize: () => ipcRenderer.invoke('storage:size'),
   clearCache: () => ipcRenderer.invoke('storage:clear'),
   lockStatus: () => ipcRenderer.invoke('lock:status'),
-  setPasscode: passcode => ipcRenderer.invoke('lock:set-passcode', passcode),
+  setPasscode: (passcode, currentPasscode) => ipcRenderer.invoke('lock:set-passcode', passcode, currentPasscode),
   removePasscode: passcode => ipcRenderer.invoke('lock:remove-passcode', passcode),
   onSettingsChanged: callback => {
     ipcRenderer.on('settings:changed', (_, data) => callback(data));

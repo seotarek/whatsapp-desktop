@@ -55,11 +55,19 @@ class LockManager {
     return this.hasPasscode() && this.config.get('lock.enabled') !== false;
   }
 
-  setPasscode(pin) {
-    if (!pin || typeof pin !== 'string' || pin.trim().length < 4) {
+  setPasscode(newPin, currentPin) {
+    if (this.hasPasscode()) {
+      if (typeof currentPin !== 'string' || !currentPin.trim()) {
+        throw new Error('Current passcode is required to change passcode');
+      }
+      if (!this.verify(currentPin)) {
+        throw new Error('Incorrect current passcode');
+      }
+    }
+    if (!newPin || typeof newPin !== 'string' || newPin.trim().length < 4) {
       throw new Error('Passcode must be at least 4 characters long');
     }
-    const clean = pin.trim();
+    const clean = newPin.trim();
     const salt = generateSalt();
     const derived = deriveHash(clean, salt);
     this.salt = salt;
@@ -67,6 +75,8 @@ class LockManager {
     this.save();
     this.config.set('lock.enabled', true);
     this.config.save();
+    this.failedAttempts = 0;
+    this.isLocked = false;
     return true;
   }
 

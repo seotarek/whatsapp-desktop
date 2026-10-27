@@ -32,6 +32,15 @@ const path = require('path');
 const AVATAR_PREFIX = 'whatsapp-desktop-avatar-';
 const runtimeDir = () => process.env.XDG_RUNTIME_DIR || os.tmpdir();
 
+const avatarDir = () => {
+  const dir = path.join(runtimeDir(), 'whatsapp-desktop-avatars');
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+  } catch (e) {}
+  return dir;
+};
+
 /* Writes the picture out and answers with its path, or null. Named from the
    bytes, so the same face is written once and never rewritten under a banner. */
 const avatarPath = base64 => {
@@ -41,9 +50,13 @@ const avatarPath = base64 => {
   if (!bytes.length) return null;
 
   const digest = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-  const file = path.join(runtimeDir(), AVATAR_PREFIX + digest);
+  const dir = avatarDir();
+  const file = path.join(dir, AVATAR_PREFIX + digest);
   try {
-    if (!fs.existsSync(file)) fs.writeFileSync(file, bytes);
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, bytes, { mode: 0o600 });
+      try { fs.chmodSync(file, 0o600); } catch (e) {}
+    }
     return file;
   } catch (e) {
     return null;
@@ -55,13 +68,22 @@ const avatarPath = base64 => {
    the client runs. Startup is the safe moment -- whatever is on screen then
    belongs to a client that is no longer running. */
 const sweepAvatars = () => {
+  const dir = path.join(runtimeDir(), 'whatsapp-desktop-avatars');
   let names = [];
-  try { names = fs.readdirSync(runtimeDir()); } catch (e) { return; }
+  try { names = fs.readdirSync(dir); } catch (e) {}
   let removed = 0;
   for (const name of names) {
     if (!name.startsWith(AVATAR_PREFIX)) continue;
-    try { fs.unlinkSync(path.join(runtimeDir(), name)); removed++; } catch (e) {}
+    try { fs.unlinkSync(path.join(dir, name)); removed++; } catch (e) {}
   }
+  /* Also clean up any legacy files from the base runtime directory */
+  try {
+    const legacyNames = fs.readdirSync(runtimeDir());
+    for (const name of legacyNames) {
+      if (!name.startsWith(AVATAR_PREFIX)) continue;
+      try { fs.unlinkSync(path.join(runtimeDir(), name)); removed++; } catch (e) {}
+    }
+  } catch (e) {}
   if (removed) console.log('cleared %d notification picture(s) from the last session', removed);
 };
 
