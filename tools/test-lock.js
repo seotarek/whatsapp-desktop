@@ -366,6 +366,37 @@ check('missing credentials when config has lock.enabled=true enters isLocked = t
 check('missing credentials when config has lock.enabled=true enters isCorrupted = true', missingCredsLock.isCorrupted, true);
 check('missing credentials when config has lock.enabled=true reports isEnabled = true', missingCredsLock.isEnabled(), true);
 
+/* Multi-launch lifecycle persistence: credentials must remain on disk across launches */
+const multiCfg = fake();
+const creator = new LockManager(multiCfg);
+creator.setPasscode('persist-across-launches');
+check('passcode set by creator', creator.hasPasscode(), true);
+check('security.json exists immediately after setPasscode', fs.existsSync(storage.SECURITY_PATH), true);
+
+// Launch 1: restart with existing valid credentials
+const launch1 = new LockManager(multiCfg);
+check('launch1 is locked on load', launch1.isLocked, true);
+check('launch1 is not corrupted', launch1.isCorrupted, false);
+check('launch1 has passcode', launch1.hasPasscode(), true);
+check('CRITICAL: security.json MUST still exist after launch1 load', fs.existsSync(storage.SECURITY_PATH), true);
+check('launch1 accepts original passcode', launch1.verify('persist-across-launches'), true);
+
+// Launch 2: second restart with existing valid credentials
+const launch2 = new LockManager(multiCfg);
+check('launch2 is locked on load', launch2.isLocked, true);
+check('launch2 is not corrupted', launch2.isCorrupted, false);
+check('launch2 has passcode', launch2.hasPasscode(), true);
+check('CRITICAL: security.json MUST still exist after launch2 load', fs.existsSync(storage.SECURITY_PATH), true);
+check('launch2 accepts original passcode', launch2.verify('persist-across-launches'), true);
+
+// Launch 3: third restart to guarantee stability
+const launch3 = new LockManager(multiCfg);
+check('launch3 is locked on load', launch3.isLocked, true);
+check('launch3 accepts original passcode', launch3.verify('persist-across-launches'), true);
+launch3.removePasscode('persist-across-launches');
+check('clean removal removes credentials', launch3.hasPasscode(), false);
+check('security.json removed after removePasscode', fs.existsSync(storage.SECURITY_PATH), false);
+
 fs.rmSync(sandbox, { recursive: true, force: true });
 
 console.log(failures ? `\n${failures} lock check(s) failed` : '\nlock checks pass');

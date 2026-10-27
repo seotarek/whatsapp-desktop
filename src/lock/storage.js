@@ -174,12 +174,6 @@ function finalizeSecurityRemoval() {
       throw new Error(`Failed to finalize credentials removal: ${err.message}`);
     }
   }
-  if (fs.existsSync(SECURITY_PATH)) {
-    try {
-      fs.unlinkSync(SECURITY_PATH);
-      syncDir(CONFIG_DIR);
-    } catch (_) {}
-  }
 }
 
 /**
