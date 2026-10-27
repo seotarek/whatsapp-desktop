@@ -35,7 +35,7 @@ const runtimeDir = () => process.env.XDG_RUNTIME_DIR || os.tmpdir();
 /* Writes the picture out and answers with its path, or null. Named from the
    bytes, so the same face is written once and never rewritten under a banner. */
 const avatarPath = base64 => {
-  if (!base64) return null;
+  if (!base64 || typeof base64 !== 'string' || base64.length > 500000) return null;
   let bytes;
   try { bytes = Buffer.from(base64, 'base64'); } catch (e) { return null; }
   if (!bytes.length) return null;

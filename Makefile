@@ -195,6 +195,7 @@ test:
 	@node tools/test-privacy.js
 	@node tools/test-lock.js
 	@node tools/test-update.js
+	@node tools/test-ipc.js
 
 run:
 	@env -u ELECTRON_RUN_AS_NODE npm start

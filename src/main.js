@@ -13,6 +13,7 @@ const { app, BrowserWindow, Menu, clipboard, session, shell, nativeTheme, ipcMai
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { pathToFileURL } = require('url');
 
 const { Config, CUSTOM_CSS_PATH } = require('./config.js');
 const desktop = require('./desktop.js');
@@ -2625,42 +2626,76 @@ const quit = () => {
 };
 
 const wireIpc = () => {
+  let lastFontStackAt = 0;
+  let lastFocusRequestAt = 0;
+  let lastUnresolvedLinkAt = 0;
+  let lastUnresolvedInviteAt = 0;
+  let lastArrivalIpcAt = 0;
+  let pageNotificationTimes = [];
+  let storeMessageTimes = [];
+
   const isFromWindow = (event, targetWindow) => {
-    if (!event || !event.sender) return true;
+    if (!event || !event.sender) return false;
     if (!targetWindow || targetWindow.isDestroyed()) return false;
     return event.sender === targetWindow.webContents;
   };
 
   const isTopFrame = event => {
-    if (event && event.senderFrame && event.senderFrame.parent !== null) {
+    if (!event || !event.senderFrame) return false;
+    return event.senderFrame.parent === null;
+  };
+
+  const isFromLocalFile = (event, filenames) => {
+    if (!event || !event.senderFrame || !event.senderFrame.url) return false;
+    const names = Array.isArray(filenames) ? filenames : [filenames];
+    try {
+      const rawUrl = event.senderFrame.url.split('?')[0];
+      const frameUrl = new URL(rawUrl);
+      if (frameUrl.protocol !== 'file:') return false;
+      return names.some(name => {
+        const expected = pathToFileURL(path.join(__dirname, name)).href;
+        return frameUrl.href === expected;
+      });
+    } catch (e) {
       return false;
     }
-    return true;
+  };
+
+  const isWhatsAppWeb = event => {
+    if (!event || !event.senderFrame || !event.senderFrame.url) return false;
+    try {
+      return new URL(event.senderFrame.url).hostname === 'web.whatsapp.com';
+    } catch (e) {
+      return false;
+    }
   };
 
   const isSettingsOrFonts = event => {
-    if (!event || !event.sender) return true;
-    return (isFromWindow(event, settingsWin) || isFromWindow(event, fontsWin)) && isTopFrame(event);
+    if (!event || !event.sender) return false;
+    return ((isFromWindow(event, settingsWin) && isFromLocalFile(event, 'settings.html')) ||
+            (isFromWindow(event, fontsWin) && isFromLocalFile(event, 'fonts.html'))) &&
+           isTopFrame(event);
   };
 
   const isLockWindow = event => {
-    if (!event || !event.sender) return true;
-    return isFromWindow(event, lockWin) && isTopFrame(event);
+    if (!event || !event.sender) return false;
+    return isFromWindow(event, lockWin) && isFromLocalFile(event, 'lock.html') && isTopFrame(event);
   };
 
   const isAboutWindow = event => {
-    if (!event || !event.sender) return true;
-    return isFromWindow(event, aboutWin) && isTopFrame(event);
+    if (!event || !event.sender) return false;
+    return isFromWindow(event, aboutWin) && isFromLocalFile(event, 'about.html') && isTopFrame(event);
   };
 
   const isMainWindow = event => {
-    if (!event || !event.sender) return true;
-    return isFromWindow(event, win) && isTopFrame(event);
+    if (!event || !event.sender) return false;
+    if (!isFromWindow(event, win) || !isTopFrame(event)) return false;
+    return isWhatsAppWeb(event) || isFromLocalFile(event, 'connection.html');
   };
 
   ipcMain.on('wa:log', (event, message) => {
-    if (!isMainWindow(event)) return;
-    console.log('page: %s', message);
+    if (!isMainWindow(event) || typeof message !== 'string') return;
+    console.log('page: %s', message.slice(0, 500));
   });
 
   /* One small response at document-start, before either loading screen paints.
@@ -2688,13 +2723,13 @@ const wireIpc = () => {
      element is (see watchCard in src/page/inject.js). */
   ipcMain.on('wa:media', (event, info) => {
     if (!isMainWindow(event)) return;
-    if (!mpris) return;
-    const state = info && info.state;
+    if (!mpris || !info || typeof info !== 'object') return;
+    const state = info.state;
     if (state === 'playing' || state === 'paused') {
       mpris.present({
         state: state === 'playing' ? 'Playing' : 'Paused',
-        durationSec: info.durationSec,
-        positionSec: info.positionSec,
+        durationSec: typeof info.durationSec === 'number' && Number.isFinite(info.durationSec) ? info.durationSec : 0,
+        positionSec: typeof info.positionSec === 'number' && Number.isFinite(info.positionSec) ? info.positionSec : 0,
       });
       return;
     }
@@ -2704,7 +2739,7 @@ const wireIpc = () => {
   /* The lock screen's own window, which is the only thing that can ask. */
   ipcMain.handle('lock:unlock', (event, passcode) => {
     if (!isLockWindow(event)) return { ok: false };
-    if (typeof passcode !== 'string' || !passcode) return { ok: false };
+    if (typeof passcode !== 'string' || !passcode || passcode.length > 64) return { ok: false };
     try {
       if (!lock.verify(passcode)) return { ok: false };
       unlockApp();
@@ -2736,14 +2771,18 @@ const wireIpc = () => {
 
   ipcMain.handle('lock:set-passcode', (event, passcode) => {
     if (!isSettingsOrFonts(event)) return { ok: false, why: 'unauthorized' };
-    if (typeof passcode !== 'string') return { ok: false, why: 'invalid passcode format' };
+    if (typeof passcode !== 'string' || passcode.length < 4 || passcode.length > 64) {
+      return { ok: false, why: 'invalid passcode format' };
+    }
     try { lock.setPasscode(passcode); return { ok: true }; }
     catch (err) { return { ok: false, why: err.message }; }
   });
 
   ipcMain.handle('lock:remove-passcode', (event, passcode) => {
     if (!isSettingsOrFonts(event)) return { ok: false, why: 'unauthorized' };
-    if (typeof passcode !== 'string') return { ok: false, why: 'invalid passcode format' };
+    if (typeof passcode !== 'string' || passcode.length < 4 || passcode.length > 64) {
+      return { ok: false, why: 'invalid passcode format' };
+    }
     try { lock.removePasscode(passcode); return { ok: true }; }
     catch (err) { return { ok: false, why: err.message }; }
   });
@@ -2760,91 +2799,91 @@ const wireIpc = () => {
   });
 
   ipcMain.handle('settings:get', event => {
-    if (!isSettingsOrFonts(event) && !isMainWindow(event)) return null;
-    return {
-      theme: config.get('view.theme') || 'system',
-      autostart: autostart.isEnabled(),
-      closeToTray: !!config.get('behaviour.close-to-tray'),
-      minimizeToTray: !!config.get('behaviour.minimize-to-tray'),
-      notifyEnabled: !!config.get('notifications.enabled'),
-      notifySound: !!config.get('notifications.sound'),
-      outgoingSound: !!config.get('notifications.outgoing-sound'),
-      zoom: Number(config.get('view.zoom')) || 1.0,
-      fontSize: Number(config.get('view.font-size')) || 16,
-      /* The palettes themselves, so the window can draw each swatch in the
-         colours it would apply rather than in a list of names. Adding one to
-         src/themes/palettes.js is then the whole change. */
-      palettes: Object.fromEntries(Object.entries(themes.THEMES)
-        .filter(([key]) => key !== 'dark' && key !== 'light')
-        .map(([key, p]) => [key, { name: p.name, bg: p.bg, text: p.text, accent: p.accent }])),
-      followDesktopAccent: config.get('view.follow-desktop-accent') !== false,
-      forceX11: !!config.get('system.force-x11'),
-      hardwareAcceleration: config.get('system.hardware-acceleration') !== false,
-      privacyStealth: !!config.get('privacy.stealth'),
-      privacyAutoBlur: config.get('privacy.auto-blur') === true,
-      privacyHoverReveal: config.get('privacy.hover-reveal') !== false,
-      privacyBlurContacts: config.get('privacy.blur-contacts') !== false,
-      customCss: !!config.get('view.custom-css'),
-      chatCards: !!config.get('view.chat-cards'),
-      mpris: config.get('behaviour.mpris') !== false,
-      spellcheck: config.get('behaviour.spellcheck') !== false,
-      spellcheckLanguages: String(config.get('behaviour.spellcheck-languages') || 'en-US'),
-      /* What Chromium will actually answer to on this machine, so the window
-         offers the dictionaries it has rather than a text field where a name it
-         does not know is typed, accepted, and silently dropped at startup --
-         which is what setSpellCheckerLanguages does with the whole list. Arabic
-         is the one worth naming: it is the obvious language to reach for here
-         and Chromium ships no dictionary for it, so it is simply absent from
-         this list and the window says why. */
-      spellcheckAvailable: (() => {
-        try { return session.defaultSession.availableSpellCheckerLanguages || []; }
-        catch (e) { return []; }
-      })(),
-      /* The family the client draws the page in, so this window can be drawn in
-         it too rather than in whatever Chromium picks for a plain page. */
-      font: uiFont(),
-      /* Everything the font section of that window draws itself from: what was
-         chosen, what it falls back to when nothing was, and what is installed.
-         The lists come with a bold and an italic flag per family, because a
-         switch for a face the font has not got is a switch that does nothing --
-         and one round trip here is cheaper than one per family the owner
-         scrolls past. */
-      fonts: {
-        desktop: desktop.interfaceFont(),
-        systemArabic: fonts.defaultFor('ar'),
-        latin: {
-          inherit: !!config.get('fonts.latin-inherit'),
-          family: config.get('fonts.latin-family') || '',
-          size: Number(config.get('fonts.latin-size')) || 100,
-          bold: !!config.get('fonts.latin-bold'),
-          italic: !!config.get('fonts.latin-italic'),
+    if (isSettingsOrFonts(event)) {
+      return {
+        theme: config.get('view.theme') || 'system',
+        autostart: autostart.isEnabled(),
+        closeToTray: !!config.get('behaviour.close-to-tray'),
+        minimizeToTray: !!config.get('behaviour.minimize-to-tray'),
+        notifyEnabled: !!config.get('notifications.enabled'),
+        notifySound: !!config.get('notifications.sound'),
+        outgoingSound: !!config.get('notifications.outgoing-sound'),
+        zoom: Number(config.get('view.zoom')) || 1.0,
+        fontSize: Number(config.get('view.font-size')) || 16,
+        palettes: Object.fromEntries(Object.entries(themes.THEMES)
+          .filter(([key]) => key !== 'dark' && key !== 'light')
+          .map(([key, p]) => [key, { name: p.name, bg: p.bg, text: p.text, accent: p.accent }])),
+        followDesktopAccent: config.get('view.follow-desktop-accent') !== false,
+        forceX11: !!config.get('system.force-x11'),
+        hardwareAcceleration: config.get('system.hardware-acceleration') !== false,
+        privacyStealth: !!config.get('privacy.stealth'),
+        privacyAutoBlur: config.get('privacy.auto-blur') === true,
+        privacyHoverReveal: config.get('privacy.hover-reveal') !== false,
+        privacyBlurContacts: config.get('privacy.blur-contacts') !== false,
+        customCss: !!config.get('view.custom-css'),
+        chatCards: !!config.get('view.chat-cards'),
+        mpris: config.get('behaviour.mpris') !== false,
+        spellcheck: config.get('behaviour.spellcheck') !== false,
+        spellcheckLanguages: String(config.get('behaviour.spellcheck-languages') || 'en-US'),
+        spellcheckAvailable: (() => {
+          try { return session.defaultSession.availableSpellCheckerLanguages || []; }
+          catch (e) { return []; }
+        })(),
+        font: uiFont(),
+        fonts: {
+          desktop: desktop.interfaceFont(),
+          systemArabic: fonts.defaultFor('ar'),
+          latin: {
+            inherit: !!config.get('fonts.latin-inherit'),
+            family: config.get('fonts.latin-family') || '',
+            size: Number(config.get('fonts.latin-size')) || 100,
+            bold: !!config.get('fonts.latin-bold'),
+            italic: !!config.get('fonts.latin-italic'),
+          },
+          arabic: {
+            inherit: !!config.get('fonts.arabic-inherit'),
+            family: config.get('fonts.arabic-family') || '',
+            size: Number(config.get('fonts.arabic-size')) || 100,
+            bold: !!config.get('fonts.arabic-bold'),
+            italic: !!config.get('fonts.arabic-italic'),
+          },
+          available: fonts.installed(),
         },
-        arabic: {
-          inherit: !!config.get('fonts.arabic-inherit'),
-          family: config.get('fonts.arabic-family') || '',
-          size: Number(config.get('fonts.arabic-size')) || 100,
-          bold: !!config.get('fonts.arabic-bold'),
-          italic: !!config.get('fonts.arabic-italic'),
-        },
-        available: fonts.installed(),
-      },
-    };
+      };
+    }
+
+    if (isFromWindow(event, win) && isFromLocalFile(event, 'connection.html') && isTopFrame(event)) {
+      return {
+        theme: config.get('view.theme') || 'system',
+        font: uiFont(),
+        palettes: Object.fromEntries(Object.entries(themes.THEMES)
+          .filter(([key]) => key !== 'dark' && key !== 'light')
+          .map(([key, p]) => [key, { name: p.name, bg: p.bg, text: p.text, accent: p.accent }])),
+      };
+    }
+
+    console.warn('security: blocked unauthorized settings:get request from %s', event?.senderFrame?.url || 'unknown');
+    return null;
   });
 
   ipcMain.handle('settings:set-theme', (event, theme) => {
-    if (!isSettingsOrFonts(event) || typeof theme !== 'string') return false;
+    if (!isSettingsOrFonts(event) || typeof theme !== 'string' || theme.length > 64) return false;
     setTheme(theme);
     return true;
   });
 
   ipcMain.handle('settings:set-autostart', (event, enable) => {
-    if (!isSettingsOrFonts(event)) return false;
+    if (!isSettingsOrFonts(event) || typeof enable !== 'boolean') return false;
     setAutostart(enable);
     return true;
   });
 
   ipcMain.handle('settings:set', (event, key, value) => {
-    if (!isSettingsOrFonts(event) || typeof key !== 'string') return { ok: false };
+    if (!isSettingsOrFonts(event) || typeof key !== 'string' || key.length > 64) return { ok: false };
+    const allowed = ['fonts.', 'view.', 'behaviour.', 'notifications.', 'privacy.', 'system.', 'lock.'];
+    if (!allowed.some(ns => key.startsWith(ns))) {
+      return { ok: false, why: 'unsupported setting key' };
+    }
     return changeSetting(key, value);
   });
 
@@ -2933,7 +2972,7 @@ const wireIpc = () => {
   });
 
   ipcMain.on('about:open', (event, where) => {
-    if (!isAboutWindow(event)) return;
+    if (!isAboutWindow(event) || typeof where !== 'string') return;
     openSite(where);
   });
 
@@ -2950,13 +2989,17 @@ const wireIpc = () => {
   ipcMain.on('wa:font-stack', (event, stack) => {
     if (!isMainWindow(event)) return;
     if (!forcingFont() || typeof stack !== 'string') return;
+    if (stack.length > 512 || !/^[a-zA-Z0-9\s,._'"-]+$/.test(stack)) return;
+    const now = Date.now();
+    if (now - lastFontStackAt < 5000) return;
+    lastFontStackAt = now;
     if (stack === pageFontStack) return;
     pageFontStack = stack;
     /* Applied straight away rather than on the next start: an @font-face alias
        is a stylesheet, and a stylesheet can be inserted into a page that is
        already open. */
     applyStyle();
-    fonts.learn(app.getPath('userData'), stack.split(','));
+    fonts.learn(app.getPath('userData'), stack.split(',').slice(0, 16));
   });
 
   /* Wrapped rather than passed: ipcMain hands the event in as the first
@@ -2972,6 +3015,9 @@ const wireIpc = () => {
    * click itself asks for nothing to coalesce with. */
   ipcMain.on('wa:focus-request', event => {
     if (!isMainWindow(event)) return;
+    const now = Date.now();
+    if (now - lastFocusRequestAt < 1000) return;
+    lastFocusRequestAt = now;
     showWindowForClick('the page asked for the focus');
   });
 
@@ -2980,10 +3026,13 @@ const wireIpc = () => {
      resort: it is what still works on the morning those module names change. */
   ipcMain.on('wa:link-unresolved', (event, chat) => {
     if (!isMainWindow(event)) return;
-    const phone = links.digitsOf(chat && chat.phone);
+    const now = Date.now();
+    if (now - lastUnresolvedLinkAt < 3000) return;
+    lastUnresolvedLinkAt = now;
+    const phone = links.digitsOf(chat && typeof chat.phone === 'string' && chat.phone.slice(0, 32));
     if (!phone || !win || win.isDestroyed()) return;
     const query = 'phone=' + encodeURIComponent(phone) +
-                  (pendingText ? '&text=' + encodeURIComponent(pendingText) : '');
+                  (pendingText ? '&text=' + encodeURIComponent(pendingText.slice(0, 4096)) : '');
     pendingText = '';
     console.log('loading WhatsApp\'s own send page for +%s', phone);
     win.loadURL('https://web.whatsapp.com/send?' + query).catch(() => {});
@@ -2994,7 +3043,11 @@ const wireIpc = () => {
      names have stopped answering -- a reload, which is why it is last. */
   ipcMain.on('wa:invite-unresolved', (event, invite) => {
     if (!isMainWindow(event)) return;
-    const code = links.inviteOf(invite && invite.code);
+    const now = Date.now();
+    if (now - lastUnresolvedInviteAt < 3000) return;
+    lastUnresolvedInviteAt = now;
+    const rawCode = invite && typeof invite.code === 'string' ? invite.code.slice(0, 64) : '';
+    const code = links.inviteOf(rawCode);
     if (!code || !win || win.isDestroyed()) return;
     console.log('loading WhatsApp\'s own invite page for %s', code);
     win.loadURL('https://web.whatsapp.com/accept?code=' + encodeURIComponent(code)).catch(() => {});
@@ -3008,9 +3061,9 @@ const wireIpc = () => {
      can call it. */
   ipcMain.on('wa:composer-ready', event => {
     if (!isMainWindow(event)) return;
-    if (!pendingText || !win || win.isDestroyed()) return;
+    if (!pendingText || typeof pendingText !== 'string' || !win || win.isDestroyed()) return;
     win.webContents.focus();
-    win.webContents.insertText(pendingText);
+    win.webContents.insertText(pendingText.slice(0, 65536));
     console.log('put the link\'s message in the composer (%d characters)', pendingText.length);
     pendingText = '';
   });
@@ -3027,7 +3080,10 @@ const wireIpc = () => {
        does not turn into a duplicate banner. */
     if (storeLive) return;
     if (!bannersAreOurs()) return;
-    lastArrivalAt = Date.now();
+    const now = Date.now();
+    if (now - lastArrivalIpcAt < 100) return;
+    lastArrivalIpcAt = now;
+    lastArrivalAt = now;
     describeThenNotify();
   });
 
@@ -3037,11 +3093,23 @@ const wireIpc = () => {
   ipcMain.on('wa:page-notification', (event, note) => {
     if (!isMainWindow(event)) return;
     if (storeLive) return;
-    if (!note || !config.get('notifications.enabled')) return;
+    if (!note || typeof note !== 'object' || !config.get('notifications.enabled')) return;
+
+    const now = Date.now();
+    pageNotificationTimes = pageNotificationTimes.filter(t => now - t < 1000);
+    if (pageNotificationTimes.length >= 10) return;
+    pageNotificationTimes.push(now);
+
+    const title = typeof note.title === 'string' ? note.title.slice(0, 256) : '';
+    const bodyText = typeof note.body === 'string' ? note.body.slice(0, 2048) : '';
+    const chat = typeof note.chat === 'string' ? note.chat.slice(0, 256) : '';
+    const id = typeof note.id === 'string' ? note.id : String(note.id || '');
+    const avatar = typeof note.avatar === 'string' && note.avatar.length <= 500000 ? note.avatar : null;
+
     /* The page says whether this chat is a group, because WhatsApp's own body
        reads "Sender: message" for one and the bare message for the other, and
        nothing in the text tells them apart. */
-    const { sender, message: said, mark } = readBody(note.body, note.group);
+    const { sender, message: said, mark } = readBody(bodyText, note.group);
     /* And the mark for what kind of thing it is, which this path never used to
        put on. The chat-list watcher labelled every preview it read; the
        notifications WhatsApp Web raises itself came through with WhatsApp's own
@@ -3052,24 +3120,24 @@ const wireIpc = () => {
     const message = mediaFromWords(said) || said;
 
     const banner = banners.show({
-      identity: [note.chat || note.title, sender, message].join(SEP),
+      identity: [chat || title, sender, message].join(SEP),
       /* Keyed on the chat the page found in its list rather than on the title
          WhatsApp wrote, so this path and the watcher's agree on what a chat is
          called. The withdrawal side speaks chat-list names and nothing else: a
          key that does not appear there is a notification nothing can take
          down. */
-      key: note.chat || note.title,
-      title: bidi.paragraph(pushName(note.title)),
+      key: chat || title,
+      title: bidi.paragraph(pushName(title)),
       body: bidi.line(sender, message, mark),
       redacted: bidi.words(mark, kindOf(message)),
-      icon: note.avatar,
+      icon: avatar,
       onClick: () => {
         showWindowForClick('a banner was clicked');
-        if (win && !win.isDestroyed()) win.webContents.send('wa:notification-clicked', note.id);
+        if (win && !win.isDestroyed()) win.webContents.send('wa:notification-clicked', id);
       },
     });
     if (banner) {
-      pageBanners.set(note.id, banner);
+      pageBanners.set(id, banner);
       /* Most of these are never mentioned again: a banner the user clicked, or
          one withdrawn when its chat was read, is finished with and WhatsApp
          never names its id. Trimmed oldest-first rather than tracked, which a
@@ -3112,9 +3180,10 @@ const wireIpc = () => {
    */
   ipcMain.on('wa:page-notification-close', (event, note) => {
     if (!isMainWindow(event)) return;
-    if (!note) return;
-    const banner = pageBanners.get(note.id);
-    pageBanners.delete(note.id);
+    if (!note || typeof note !== 'object') return;
+    const id = typeof note.id === 'string' ? note.id : String(note.id || '');
+    const banner = pageBanners.get(id);
+    pageBanners.delete(id);
     if (!banner) return;
     if (unreadChatNames.has(banner.key)) {
       console.log('WhatsApp closed its notification for %s but the chat still has ' +
@@ -3130,7 +3199,7 @@ const wireIpc = () => {
 
   ipcMain.on('wa:store-ready', (event, state) => {
     if (!isMainWindow(event)) return;
-    const ready = !!(state && state.ready);
+    const ready = !!(state && typeof state === 'object' && state.ready);
     if (ready === storeLive) return;
     storeLive = ready;
     if (!ready) {
@@ -3154,23 +3223,35 @@ const wireIpc = () => {
      link is https", are both gone with the body they were reading. */
   ipcMain.on('wa:store-message', (event, note) => {
     if (!isMainWindow(event)) return;
-    if (!note || !note.chat || !note.title) return;
+    if (!note || typeof note !== 'object' || typeof note.chat !== 'string' || typeof note.title !== 'string') return;
     if (!storeBannersAreOurs()) return;
 
-    chatTitles.set(note.chat, note.title);
+    const now = Date.now();
+    storeMessageTimes = storeMessageTimes.filter(t => now - t < 1000);
+    if (storeMessageTimes.length >= 15) return;
+    storeMessageTimes.push(now);
+
+    const chat = note.chat.slice(0, 128);
+    const title = note.title.slice(0, 256);
+    const msg = typeof note.msg === 'string' ? note.msg.slice(0, 128) : '';
+    const text = typeof note.text === 'string' ? note.text.slice(0, 4096) : '';
+    const sender = typeof note.sender === 'string' ? note.sender.slice(0, 256) : '';
+    const avatar = typeof note.avatar === 'string' && note.avatar.length <= 500000 ? note.avatar : null;
+
+    chatTitles.set(chat, title);
     if (chatTitles.size > 512) chatTitles.delete(chatTitles.keys().next().value);
 
-    const mark = note.mark ? note.mark.trim() : '';
+    const mark = typeof note.mark === 'string' ? note.mark.trim().slice(0, 64) : '';
     /* The mark and the words, in that order, and either of them may be missing:
        a photo with no caption is its mark alone, and a message of words has none
        at all. */
-    const said = [mark, note.text].filter(Boolean).join(' ');
+    const said = [mark, text].filter(Boolean).join(' ');
     /* And a message aimed at the user says so in front of the sender, in
        WhatsApp's own words: "Replied to you: Mega: تيست". It opens the line
        rather than standing above it, and the line is all there is -- a banner
        broken into two paragraphs loses everything under the first one in the
        notification centre, which is the note on BREAKS in bidi.js. */
-    const aimed = note.aimed ? String(note.aimed).trim() : '';
+    const aimed = note.aimed ? String(note.aimed).trim().slice(0, 128) : '';
 
     /* Two ways to put a name in front of a line, and the difference is not
        cosmetic. A message is "Mega: نتقابل بكرة" -- the colon says Mega SAID
@@ -3179,27 +3260,27 @@ const wireIpc = () => {
        claim otherwise. Either way the mark opens the line, the name is isolated
        and pinned to the left margin, and the message keeps its own direction
        inside an isolate of its own. */
-    const body = note.join === 'space' ? bidi.did(note.sender, said, aimed)
-                                       : bidi.line(note.sender, said, aimed);
+    const body = note.join === 'space' ? bidi.did(sender, said, aimed)
+                                       : bidi.line(sender, said, aimed);
     const banner = banners.show({
       /* The message and no other. This used to be the chat, the sender and the
          text hashed together, which is as close to a message's identity as
          reading a chat list can get -- and it cost a genuinely repeated message
          inside two minutes, because two identical sentences hash the same. A
          message id is the thing itself. */
-      identity: note.msg,
-      msgId: note.msg,
+      identity: msg,
+      msgId: msg,
       /* Keyed on the chat ID. Every withdrawal below speaks the same identity,
          so a banner can always be taken down -- which a key made of a display
          name could not promise, with two chats sharing one. */
-      key: note.chat,
-      title: bidi.paragraph(note.title),
+      key: chat,
+      title: bidi.paragraph(title),
       body,
       /* What the banner may say with previews turned off. The page names it when
          the mark alone would not -- a reaction has no mark, and "New message" is
          the wrong thing to call one. */
-      redacted: bidi.words(aimed, note.redacted || mark || 'New message'),
-      icon: note.avatar,
+      redacted: bidi.words(aimed, (typeof note.redacted === 'string' ? note.redacted.slice(0, 64) : '') || mark || 'New message'),
+      icon: avatar,
       onClick: () => {
         showWindowForClick('a banner was clicked');
         /* The message travels with the click, and a story travels with a flag
@@ -3207,14 +3288,14 @@ const wireIpc = () => {
            everybody else's updates, and opening that chat is not what the user
            asked for by clicking it. The page opens the story itself. */
         if (win && !win.isDestroyed())
-          win.webContents.send('wa:store-open', { chat: note.chat, name: note.title,
-                                                  preview: note.text, msg: note.msg,
+          win.webContents.send('wa:store-open', { chat, name: title,
+                                                  preview: text, msg,
                                                   story: !!note.story });
       },
     });
     if (!banner) return;
     console.log('raised: %s in %s%s', note.why === 'reaction' ? 'a reaction'
-                : mark || 'a message of words', note.title,
+                : mark || 'a message of words', title,
                 note.mention ? ' (addressed to you)' : '');
     playTone();
   });
@@ -3243,33 +3324,40 @@ const wireIpc = () => {
    * sound over the first. */
   ipcMain.on('wa:store-ringing', (event, note) => {
     if (!isMainWindow(event)) return;
-    if (!note || !note.chat || !note.title || !note.call) return;
+    if (!note || typeof note !== 'object' || typeof note.chat !== 'string' || typeof note.title !== 'string' || typeof note.call !== 'string') return;
     if (!storeBannersAreOurs()) return;
 
-    chatTitles.set(note.chat, note.title);
+    const chat = note.chat.slice(0, 128);
+    const title = note.title.slice(0, 256);
+    const call = note.call.slice(0, 128);
+    const mark = typeof note.mark === 'string' ? note.mark.slice(0, 64) : '';
+    const sender = typeof note.sender === 'string' ? note.sender.slice(0, 256) : '';
+    const avatar = typeof note.avatar === 'string' && note.avatar.length <= 500000 ? note.avatar : null;
+
+    chatTitles.set(chat, title);
 
     const banner = banners.show({
       /* The call, not the message. The banner for a call that was missed is
          keyed on the message it was written into, so the two live side by side
          for the moment it takes one to replace the other. */
-      identity: 'ring' + SEP + note.call,
-      msgId: 'ring' + SEP + note.call,
-      key: note.chat,
+      identity: 'ring' + SEP + call,
+      msgId: 'ring' + SEP + call,
+      key: chat,
       /* Not a message, so nothing about the chat being read takes it down. */
       ongoing: true,
-      title: bidi.paragraph(note.title),
-      body: bidi.line(note.sender, note.mark),
-      redacted: note.mark,
-      icon: note.avatar,
+      title: bidi.paragraph(title),
+      body: bidi.line(sender, mark),
+      redacted: mark,
+      icon: avatar,
       onClick: () => {
         showWindowForClick('a ringing banner was clicked');
         if (win && !win.isDestroyed())
-          win.webContents.send('wa:store-open', { chat: note.chat, name: note.title });
+          win.webContents.send('wa:store-open', { chat, name: title });
       },
     });
     if (!banner) return;
-    ringingBanners.add('ring' + SEP + note.call);
-    console.log('ringing: %s in %s', note.mark, note.title);
+    ringingBanners.add('ring' + SEP + call);
+    console.log('ringing: %s in %s', mark, title);
   });
 
   /* And the ringing stopping, whatever stopped it. What follows -- a banner for
@@ -3277,11 +3365,12 @@ const wireIpc = () => {
      this handler's business. */
   ipcMain.on('wa:store-ring-over', (event, note) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive || !note || !note.call || !banners) return;
-    ringingBanners.delete('ring' + SEP + note.call);
-    if (banners.closeMessage('ring' + SEP + note.call))
+    if (!storeLive || !note || typeof note !== 'object' || typeof note.call !== 'string' || !banners) return;
+    const call = note.call.slice(0, 128);
+    ringingBanners.delete('ring' + SEP + call);
+    if (banners.closeMessage('ring' + SEP + call))
       console.log('the telephone has stopped ringing in %s',
-                  chatTitles.get(note.chat) || note.chat);
+                  chatTitles.get(note.chat) || note.chat || 'a chat');
   });
 
   ipcMain.on('wa:store-open-arrival', event => {
@@ -3294,19 +3383,20 @@ const wireIpc = () => {
      which and it does not matter. */
   ipcMain.on('wa:store-read', (event, state) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive || !state) return;
-    storeRead(state.chat, Number(state.unread) || 0);
+    if (!storeLive || !state || typeof state !== 'object' || typeof state.chat !== 'string') return;
+    const unread = Number(state.unread);
+    storeRead(state.chat.slice(0, 128), Number.isFinite(unread) ? unread : 0);
   });
 
   ipcMain.on('wa:store-active', (event, state) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive || !state) return;
-    storeActive(state.chat || '');
+    if (!storeLive || !state || typeof state !== 'object') return;
+    storeActive(typeof state.chat === 'string' ? state.chat.slice(0, 128) : '');
   });
 
   ipcMain.on('wa:store-unread', (event, map) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive) return;
+    if (!storeLive || !map || typeof map !== 'object') return;
     storeUnread(map);
   });
 
@@ -3316,24 +3406,24 @@ const wireIpc = () => {
      about a message twice over and about its contents not at all. */
   ipcMain.on('wa:store-gone', (event, state) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive || !state || !state.msg || !banners) return;
-    const closed = banners.closeMessage(state.msg);
+    if (!storeLive || !state || typeof state !== 'object' || typeof state.msg !== 'string' || !banners) return;
+    const msg = state.msg.slice(0, 128);
+    const closed = banners.closeMessage(msg);
     if (!closed) return;
     /* The two things that take one notification down rather than a chat's worth
        of them, told apart in the log because they are told apart nowhere else:
        a message deleted for everyone, and a reaction taken back or read. */
     console.log('withdrew %d notification(s) in %s: %s', closed,
-                chatTitles.get(state.chat) || state.chat || 'a chat',
-                String(state.msg).startsWith('reaction') ? 'the reaction is gone'
-                                                         : 'the message was deleted');
+                chatTitles.get(state.chat) || (typeof state.chat === 'string' ? state.chat.slice(0, 128) : 'a chat'),
+                msg.startsWith('reaction') ? 'the reaction is gone' : 'the message was deleted');
   });
 
   ipcMain.on('wa:store-count', (event, count) => {
     if (!isMainWindow(event)) return;
-    if (!storeLive || !count || typeof count.messages !== 'number') return;
-    unreadMessages = count.messages;
-    setBadge(count.messages);
-    if (tray) tray.setAttention(count.messages > 0);
+    if (!storeLive || !count || typeof count !== 'object' || typeof count.messages !== 'number' || !Number.isFinite(count.messages)) return;
+    unreadMessages = Math.max(0, Math.floor(count.messages));
+    setBadge(unreadMessages);
+    if (tray) tray.setAttention(unreadMessages > 0);
   });
 
   /* The conversation on screen, reported by the page when it changes and again
@@ -3344,7 +3434,7 @@ const wireIpc = () => {
   ipcMain.on('wa:open-chat', (event, name) => {
     if (!isMainWindow(event)) return;
     if (storeLive) return;
-    openChat = typeof name === 'string' ? name : '';
+    openChat = typeof name === 'string' ? name.slice(0, 256) : '';
     withdrawOpen();
   });
 
@@ -3357,13 +3447,14 @@ const wireIpc = () => {
     if (!isMainWindow(event)) return;
     if (storeLive) return;
     if (!Array.isArray(names) || !banners) return;
-    unreadChatNames = new Set(names);
+    const safeNames = names.filter(n => typeof n === 'string').map(n => n.slice(0, 256));
+    unreadChatNames = new Set(safeNames);
     const held = banners.keys();
     /* Names, never messages. Which chats are unread and which still have a
        banner up is the whole of the withdrawal question, and it is the one thing
        a log of this path has to be able to answer. */
     if (held.length)
-      console.log('unread: [%s]; banners still up for: [%s]', names.join(', '), held.join(', '));
+      console.log('unread: [%s]; banners still up for: [%s]', safeNames.join(', '), held.join(', '));
     for (const key of new Set([...held, ...withdrawing.keys()])) withdrawRead(key);
   });
 
@@ -3372,10 +3463,10 @@ const wireIpc = () => {
   ipcMain.on('wa:unread-count', (event, count) => {
     if (!isMainWindow(event)) return;
     if (storeLive) return;
-    if (!count || typeof count.messages !== 'number') return;
-    unreadMessages = count.messages;
-    setBadge(count.messages);
-    if (tray) tray.setAttention(count.messages > 0);
+    if (!count || typeof count !== 'object' || typeof count.messages !== 'number' || !Number.isFinite(count.messages)) return;
+    unreadMessages = Math.max(0, Math.floor(count.messages));
+    setBadge(unreadMessages);
+    if (tray) tray.setAttention(unreadMessages > 0);
   });
 };
 
