@@ -21,6 +21,8 @@ class LockManager {
     this.salt = null;
     this.hash = null;
     this.isLocked = false;
+    this.isCorrupted = false;
+    this.corruptionError = null;
     this.failedAttempts = 0;
     this.lockoutUntil = 0;
     this.lastActivity = Date.now();
@@ -28,28 +30,82 @@ class LockManager {
   }
 
   load() {
-    const { salt, hash } = storage.loadSecurityState();
-    if (salt && hash) {
-      this.salt = salt;
-      this.hash = hash;
+    const state = storage.loadSecurityState();
+
+    if (state.status === 'valid') {
+      this.salt = state.salt;
+      this.hash = state.hash;
       this.isLocked = true;
+      this.isCorrupted = false;
+      this.corruptionError = null;
       if (this.config.get('lock.enabled') !== true) {
         this.config.set('lock.enabled', true);
-        try {
-          this.config.save();
-        } catch (_) {}
+        try { this.config.save(); } catch (_) {}
       }
-    } else {
-      this.salt = null;
-      this.hash = null;
-      this.isLocked = false;
-      if (this.config.get('lock.enabled') === true) {
-        this.config.set('lock.enabled', false);
-        try {
-          this.config.save();
-        } catch (_) {}
+      try { storage.finalizeSecurityRemoval(); } catch (_) {}
+      return;
+    }
+
+    if (state.status === 'staged_removal') {
+      // Interrupted removal transaction detected
+      if (this.config.get('lock.enabled') === false) {
+        try { storage.finalizeSecurityRemoval(); } catch (_) {}
+        this.salt = null;
+        this.hash = null;
+        this.isLocked = false;
+        this.isCorrupted = false;
+        this.corruptionError = null;
+        return;
+      }
+      // Removal was interrupted before config was saved: recover credentials
+      try {
+        storage.abortSecurityRemoval();
+        this.salt = state.salt;
+        this.hash = state.hash;
+        this.isLocked = true;
+        this.isCorrupted = false;
+        this.corruptionError = null;
+        this.config.set('lock.enabled', true);
+        try { this.config.save(); } catch (_) {}
+        return;
+      } catch (err) {
+        this.salt = null;
+        this.hash = null;
+        this.isLocked = true;
+        this.isCorrupted = true;
+        this.corruptionError = err;
+        return;
       }
     }
+
+    if (state.status === 'corrupted') {
+      // Credentials file is corrupted or unreadable: FAIL CLOSED
+      this.salt = null;
+      this.hash = null;
+      this.isLocked = true;
+      this.isCorrupted = true;
+      this.corruptionError = state.error || new Error('Security credentials file is corrupted or unreadable');
+      console.warn('App lock entering protective lockdown: credentials storage is corrupted or unreadable.');
+      return;
+    }
+
+    // State is 'missing'
+    if (this.config.get('lock.enabled') === true) {
+      // Lock is enabled in configuration but credentials file is missing: FAIL CLOSED
+      this.salt = null;
+      this.hash = null;
+      this.isLocked = true;
+      this.isCorrupted = true;
+      this.corruptionError = new Error('Lock is enabled in configuration but credentials file is missing');
+      console.warn('App lock entering protective lockdown: lock is enabled in config but credentials file is missing.');
+      return;
+    }
+
+    this.salt = null;
+    this.hash = null;
+    this.isLocked = false;
+    this.isCorrupted = false;
+    this.corruptionError = null;
   }
 
   save() {
@@ -61,10 +117,13 @@ class LockManager {
   }
 
   isEnabled() {
-    return this.hasPasscode();
+    return this.hasPasscode() || this.isCorrupted;
   }
 
   setPasscode(newPin, currentPin) {
+    if (this.isCorrupted) {
+      throw new Error('Cannot change passcode while security storage is corrupted. Manual recovery required.');
+    }
     if (this.hasPasscode()) {
       if (typeof currentPin !== 'string' || !currentPin.trim()) {
         throw new Error('Current passcode is required to change passcode');
@@ -92,6 +151,8 @@ class LockManager {
       this.config.save({ throwOnError: true });
       this.failedAttempts = 0;
       this.isLocked = false;
+      this.isCorrupted = false;
+      this.corruptionError = null;
       return true;
     } catch (err) {
       let rollbackErr = null;
@@ -119,7 +180,10 @@ class LockManager {
   }
 
   removePasscode(currentPin) {
-    if (!this.hasPasscode()) return true;
+    if (!this.hasPasscode() && !this.isCorrupted) return true;
+    if (this.isCorrupted) {
+      throw new Error('Cannot remove passcode while security storage is corrupted. Manual recovery required.');
+    }
     // Never remove an existing passcode without verifying it.
     if (typeof currentPin !== 'string' || !currentPin.trim()) {
       throw new Error('Current passcode is required');
@@ -132,10 +196,9 @@ class LockManager {
     const prevHash = this.hash;
     const prevEnabled = this.config.get('lock.enabled');
 
-    // 1. Unlink credentials file from disk FIRST.
-    // If unlinking fails, credentials remain intact on disk, abort immediately.
+    // 1. Stage removal: atomicity via POSIX rename to pending-delete
     try {
-      storage.removeSecurityFile();
+      storage.stageSecurityRemoval();
     } catch (err) {
       throw new Error(`Failed to remove credentials file: ${err.message}`);
     }
@@ -145,11 +208,10 @@ class LockManager {
     try {
       this.config.save({ throwOnError: true });
     } catch (cfgErr) {
-      // Config save failed: restore security credentials to avoid leaving
-      // an inconsistent or unmanaged state.
+      // Config save failed: restore staged credentials back to security.json
       let restoreErr = null;
       try {
-        storage.saveSecurityState(prevSalt, prevHash);
+        storage.abortSecurityRemoval();
       } catch (rErr) {
         restoreErr = rErr;
       }
@@ -162,13 +224,25 @@ class LockManager {
       throw new Error(`Failed to persist lock configuration: ${cfgErr.message}`);
     }
 
+    // 3. Finalize removal by unlinking the staged file
+    try {
+      storage.finalizeSecurityRemoval();
+    } catch (finErr) {
+      console.warn('Could not unlink staged file:', finErr.message);
+    }
+
     this.salt = null;
     this.hash = null;
     this.isLocked = false;
+    this.isCorrupted = false;
+    this.corruptionError = null;
     return true;
   }
 
   verify(pin) {
+    if (this.isCorrupted) {
+      throw new Error('Security credentials file is corrupted or unreadable. Manual recovery required.');
+    }
     if (!this.hasPasscode()) return true;
     if (Date.now() < this.lockoutUntil) {
       const waitSec = Math.ceil((this.lockoutUntil - Date.now()) / 1000);
@@ -222,4 +296,5 @@ class LockManager {
 module.exports = {
   LockManager,
   SECURITY_PATH: storage.SECURITY_PATH,
+  SECURITY_STAGE_PATH: storage.SECURITY_STAGE_PATH,
 };

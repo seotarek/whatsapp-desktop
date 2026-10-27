@@ -244,11 +244,11 @@ restartedLock.removePasscode('truth123');
 check('after clean removal, isLocked is false', restartedLock.isLocked, false);
 check('after clean removal, isEnabled is false', restartedLock.isEnabled(), false);
 
-/* Edge case: removeSecurityFile throws during removePasscode */
+/* Edge case: stageSecurityRemoval throws during removePasscode */
 const unremovableLock = new LockManager(fake());
 unremovableLock.setPasscode('keepme123');
-const origRemove = storage.removeSecurityFile;
-storage.removeSecurityFile = () => {
+const origStage = storage.stageSecurityRemoval;
+storage.stageSecurityRemoval = () => {
   throw new Error('EPERM: operation not permitted');
 };
 let threwOnRemoveFile = false;
@@ -257,20 +257,20 @@ try {
 } catch (e) {
   threwOnRemoveFile = e.message.includes('Failed to remove credentials file');
 } finally {
-  storage.removeSecurityFile = origRemove;
+  storage.stageSecurityRemoval = origStage;
 }
 check('removePasscode throws when credentials file removal fails', threwOnRemoveFile, true);
 check('passcode retained after credentials file removal failure', unremovableLock.hasPasscode(), true);
 unremovableLock.removePasscode('keepme123');
 check('unremovableLock cleaned up after test', unremovableLock.hasPasscode(), false);
 
-/* Edge case: failure of restoration during removePasscode config failure */
+/* Edge case: failure of abortSecurityRemoval during removePasscode config failure */
 const restoreFailConfig = fake();
 const restoreFailLock = new LockManager(restoreFailConfig);
 restoreFailLock.setPasscode('restorefail');
 restoreFailConfig.failSave = true;
-const origSaveState = storage.saveSecurityState;
-storage.saveSecurityState = () => {
+const origAbort = storage.abortSecurityRemoval;
+storage.abortSecurityRemoval = () => {
   throw new Error('Disk full');
 };
 let threwBoth = false;
@@ -279,7 +279,7 @@ try {
 } catch (e) {
   threwBoth = e.message.includes('and failed to restore credentials file: Disk full');
 } finally {
-  storage.saveSecurityState = origSaveState;
+  storage.abortSecurityRemoval = origAbort;
 }
 check('removePasscode surfaces both errors when restore fails', threwBoth, true);
 restoreFailConfig.failSave = false;
@@ -287,6 +287,7 @@ try { restoreFailLock.removePasscode('restorefail'); } catch (_) {}
 try { storage.removeSecurityFile(); } catch (_) {}
 
 /* Edge case: failure of rollback during setPasscode config failure */
+const origRemove = storage.removeSecurityFile;
 const setFailConfig = fake();
 setFailConfig.failSave = true;
 const setFailLock = new LockManager(setFailConfig);
@@ -303,6 +304,67 @@ try {
 }
 check('setPasscode surfaces rollback failure when rollback throws', threwSetRollback, true);
 try { storage.removeSecurityFile(); } catch (_) {}
+
+/* Transactional recovery: crash during removal transaction followed by restart */
+const crashConfig = fake();
+const crashLock = new LockManager(crashConfig);
+crashLock.setPasscode('crashrecover');
+check('crashLock passcode set', crashLock.hasPasscode(), true);
+
+// Simulate crash after Phase 1 (staged removal): credentials moved to pending-delete, config not saved
+fs.renameSync(storage.SECURITY_PATH, storage.SECURITY_STAGE_PATH);
+check('main security.json absent during simulated crash', fs.existsSync(storage.SECURITY_PATH), false);
+check('staged pending-delete file exists during simulated crash', fs.existsSync(storage.SECURITY_STAGE_PATH), true);
+
+// Startup of fresh LockManager simulates application launch after crash
+const recoveredLock = new LockManager(crashConfig);
+check('restarted LockManager fails closed and locks app after crash during removal', recoveredLock.isLocked, true);
+check('restarted LockManager restored credentials from stage', recoveredLock.hasPasscode(), true);
+check('restarted LockManager can verify original passcode', recoveredLock.verify('crashrecover'), true);
+check('main security.json was restored to disk', fs.existsSync(storage.SECURITY_PATH), true);
+check('staged pending-delete file was cleaned up', fs.existsSync(storage.SECURITY_STAGE_PATH), false);
+recoveredLock.removePasscode('crashrecover');
+
+/* Corrupted security.json fails closed into protective lockdown */
+const corruptConfig = fake();
+const corruptLock = new LockManager(corruptConfig);
+corruptLock.setPasscode('validfirst');
+
+// Corrupt security.json on disk with malformed JSON
+fs.writeFileSync(storage.SECURITY_PATH, '<<< INVALID JSON CORRUPTED DATA >>>', { mode: 0o600 });
+
+// New LockManager startup simulates application launch with corrupted credentials
+const startupCorruptLock = new LockManager(corruptConfig);
+check('startup with corrupted security.json enters isLocked = true', startupCorruptLock.isLocked, true);
+check('startup with corrupted security.json enters isCorrupted = true', startupCorruptLock.isCorrupted, true);
+check('startup with corrupted security.json reports isEnabled = true', startupCorruptLock.isEnabled(), true);
+check('startup with corrupted security.json does not wipe lock.enabled from config', corruptConfig.get('lock.enabled'), true);
+
+let threwOnCorruptVerify = false;
+try {
+  startupCorruptLock.verify('anything');
+} catch (e) {
+  threwOnCorruptVerify = e.message.includes('Security credentials file is corrupted or unreadable');
+}
+check('verify() refuses any passcode and throws recovery error when corrupted', threwOnCorruptVerify, true);
+
+let threwOnCorruptRemove = false;
+try {
+  startupCorruptLock.removePasscode('anything');
+} catch (e) {
+  threwOnCorruptRemove = e.message.includes('Cannot remove passcode while security storage is corrupted');
+}
+check('removePasscode() refused while security storage is corrupted', threwOnCorruptRemove, true);
+
+// Clean up corrupt file
+try { fs.unlinkSync(storage.SECURITY_PATH); } catch (_) {}
+
+/* Missing security.json when config has lock.enabled = true fails closed */
+const missingCredsConfig = fake({ 'lock.enabled': true });
+const missingCredsLock = new LockManager(missingCredsConfig);
+check('missing credentials when config has lock.enabled=true enters isLocked = true', missingCredsLock.isLocked, true);
+check('missing credentials when config has lock.enabled=true enters isCorrupted = true', missingCredsLock.isCorrupted, true);
+check('missing credentials when config has lock.enabled=true reports isEnabled = true', missingCredsLock.isEnabled(), true);
 
 fs.rmSync(sandbox, { recursive: true, force: true });
 
