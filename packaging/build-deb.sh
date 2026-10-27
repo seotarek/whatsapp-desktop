@@ -12,7 +12,7 @@ mkdir -p "$DIST"
 rm -f "$DIST"/whatsapp-desktop_"$VERSION"_"$ARCH".deb
 
 if [[ ! -x "$ROOT/node_modules/electron/dist/electron" ]]; then
-  (cd "$ROOT" && npm ci --no-audit --no-fund)
+  (cd "$ROOT" && npm ci --no-audit --no-fund && node node_modules/electron/install.js)
 fi
 
 # The Makefile is the single source of truth for the installed application tree.

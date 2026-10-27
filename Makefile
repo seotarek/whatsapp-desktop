@@ -38,6 +38,7 @@ all: $(ELECTRON)/electron
 
 $(ELECTRON)/electron:
 	npm install --no-audit --no-fund
+	@test -x $(ELECTRON)/electron || node node_modules/electron/install.js
 
 # What the app itself is: everything the runtime reads, and nothing else.
 APP_FILES = package.json src data

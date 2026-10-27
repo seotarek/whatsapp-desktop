@@ -13,6 +13,10 @@ echo "Building AppImage for whatsapp-desktop $VERSION ($ARCH)..."
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR" "$OUTDIR"
 
+if [[ ! -x "$DIR/node_modules/electron/dist/electron" ]]; then
+  (cd "$DIR" && npm ci --no-audit --no-fund && node node_modules/electron/install.js)
+fi
+
 # Stage via Makefile
 make -C "$DIR" install DESTDIR="$APPDIR" PREFIX=/usr
 
