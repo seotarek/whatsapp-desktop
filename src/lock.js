@@ -72,7 +72,11 @@ class LockManager {
 
   removePasscode(currentPin) {
     if (!this.hasPasscode()) return true;
-    if (currentPin && !this.verify(currentPin)) {
+    // Never remove an existing passcode without verifying it.
+    if (typeof currentPin !== 'string' || !currentPin.trim()) {
+      throw new Error('Current passcode is required');
+    }
+    if (!this.verify(currentPin)) {
       throw new Error('Incorrect passcode');
     }
     this.salt = null;

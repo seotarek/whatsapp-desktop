@@ -96,6 +96,20 @@ removing.setPasscode('1234');
 check('the passcode cannot be removed by someone who does not know it', (() => {
   try { removing.removePasscode('9999'); return 'removed'; } catch (e) { return 'refused'; }
 })(), 'refused');
+check('missing passcode cannot remove the lock', (() => {
+  try { removing.removePasscode(); return 'removed'; } catch (e) { return 'refused'; }
+})(), 'refused');
+check('empty passcode cannot remove the lock', (() => {
+  try { removing.removePasscode(''); return 'removed'; } catch (e) { return 'refused'; }
+})(), 'refused');
+check('whitespace passcode cannot remove the lock', (() => {
+  try { removing.removePasscode(' '); return 'removed'; } catch (e) { return 'refused'; }
+})(), 'refused');
+check(
+  'lock remains active after rejected removal attempts',
+  removing.hasPasscode(),
+  true
+);
 removing.removePasscode('1234');
 check('and it can by someone who does', removing.hasPasscode(), false);
 
