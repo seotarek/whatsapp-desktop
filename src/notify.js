@@ -34,10 +34,19 @@ const runtimeDir = () => process.env.XDG_RUNTIME_DIR || os.tmpdir();
 
 const avatarDir = () => {
   const dir = path.join(runtimeDir(), 'whatsapp-desktop-avatars');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
-  } catch (e) {}
+  } catch (e) {
+    try {
+      const stat = fs.statSync(dir);
+      if ((stat.mode & 0o077) !== 0) {
+        throw new Error(`Insecure avatar cache directory mode: ${(stat.mode & 0o777).toString(8)}`);
+      }
+    } catch (statErr) {
+      throw new Error(`Cannot secure avatar cache directory: ${statErr.message}`);
+    }
+  }
   return dir;
 };
 
@@ -49,8 +58,15 @@ const avatarPath = base64 => {
   try { bytes = Buffer.from(base64, 'base64'); } catch (e) { return null; }
   if (!bytes.length) return null;
 
+  let dir;
+  try {
+    dir = avatarDir();
+  } catch (e) {
+    console.warn('notify: avatar directory failed security check:', e.message);
+    return null;
+  }
+
   const digest = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-  const dir = avatarDir();
   const file = path.join(dir, AVATAR_PREFIX + digest);
   try {
     if (!fs.existsSync(file)) {

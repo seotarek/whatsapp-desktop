@@ -196,6 +196,7 @@ test:
 	@node tools/test-lock.js
 	@node tools/test-update.js
 	@node tools/test-ipc.js
+	@node tools/test-permissions-screenshare.js
 
 run:
 	@env -u ELECTRON_RUN_AS_NODE npm start

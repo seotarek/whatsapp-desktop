@@ -70,9 +70,9 @@ class LockManager {
     const clean = newPin.trim();
     const salt = generateSalt();
     const derived = deriveHash(clean, salt);
+    saveSecurityState(salt, derived);
     this.salt = salt;
     this.hash = derived;
-    this.save();
     this.config.set('lock.enabled', true);
     this.config.save();
     this.failedAttempts = 0;
@@ -89,9 +89,9 @@ class LockManager {
     if (!this.verify(currentPin)) {
       throw new Error('Incorrect passcode');
     }
+    removeSecurityFile();
     this.salt = null;
     this.hash = null;
-    removeSecurityFile();
     this.config.set('lock.enabled', false);
     this.config.save();
     this.isLocked = false;

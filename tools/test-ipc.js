@@ -301,6 +301,11 @@ async function run() {
     lockTimeoutResult && lockTimeoutResult.ok === true
   );
 
+  const lockTimeoutZeroResult = await settingsSet(settingsEvent, 'lock.timeout', 0);
+  check('settings:set accepts lock.timeout = 0 to disable auto-lock',
+    lockTimeoutZeroResult && lockTimeoutZeroResult.ok === true
+  );
+
   const invalidTimeoutResult = await settingsSet(settingsEvent, 'lock.timeout', -5);
   check('settings:set rejects invalid negative lock.timeout',
     invalidTimeoutResult && invalidTimeoutResult.ok === false
@@ -404,14 +409,14 @@ async function run() {
   const secureScope = {};
   const isWhatsAppSecureCode = mainSource.slice(
     mainSource.indexOf('const isWhatsAppSecure ='),
-    mainSource.indexOf('const isOwnPage =')
+    mainSource.indexOf('const isWhatsAppWeb =')
   );
-  const isOwnPageCode = mainSource.slice(
-    mainSource.indexOf('const isOwnPage ='),
+  const isWhatsAppWebCode = mainSource.slice(
+    mainSource.indexOf('const isWhatsAppWeb ='),
     mainSource.indexOf('const ALLOWED_EXTERNAL_PROTOCOLS =')
   );
-  vm.runInNewContext(isWhatsAppSecureCode + '\n' + isOwnPageCode + '\nsecureScope.isWhatsAppSecure = isWhatsAppSecure; secureScope.isOwnPage = isOwnPage;', { URL, secureScope });
-  const { isWhatsAppSecure, isOwnPage } = secureScope;
+  vm.runInNewContext(isWhatsAppSecureCode + '\n' + isWhatsAppWebCode + '\nsecureScope.isWhatsAppSecure = isWhatsAppSecure; secureScope.isWhatsAppWeb = isWhatsAppWeb;', { URL, secureScope });
+  const { isWhatsAppSecure, isWhatsAppWeb } = secureScope;
 
   check('isWhatsAppSecure accepts https://web.whatsapp.com/', isWhatsAppSecure('https://web.whatsapp.com/'));
   check('isWhatsAppSecure accepts https://chat.whatsapp.com/invite', isWhatsAppSecure('https://chat.whatsapp.com/invite'));
@@ -421,10 +426,11 @@ async function run() {
   check('isWhatsAppSecure rejects spoofed domain', !isWhatsAppSecure('https://web.whatsapp.com.attacker.com/'));
   check('isWhatsAppSecure rejects non-string input', !isWhatsAppSecure(null) && !isWhatsAppSecure(undefined) && !isWhatsAppSecure(123));
 
-  check('isOwnPage accepts https://web.whatsapp.com/', isOwnPage('https://web.whatsapp.com/'));
-  check('isOwnPage rejects http://web.whatsapp.com/', !isOwnPage('http://web.whatsapp.com/'));
-  check('isOwnPage rejects subdomains like faq.whatsapp.com', !isOwnPage('https://faq.whatsapp.com/'));
-  check('isOwnPage rejects non-string input', !isOwnPage(null) && !isOwnPage(undefined));
+  check('isWhatsAppWeb accepts https://web.whatsapp.com/', isWhatsAppWeb('https://web.whatsapp.com/'));
+  check('isWhatsAppWeb rejects http://web.whatsapp.com/', !isWhatsAppWeb('http://web.whatsapp.com/'));
+  check('isWhatsAppWeb rejects subdomains like faq.whatsapp.com', !isWhatsAppWeb('https://faq.whatsapp.com/'));
+  check('isWhatsAppWeb rejects chat.whatsapp.com', !isWhatsAppWeb('https://chat.whatsapp.com/'));
+  check('isWhatsAppWeb rejects non-string input', !isWhatsAppWeb(null) && !isWhatsAppWeb(undefined));
 
   console.log('\nipc security checks pass');
   if (failures > 0) process.exit(1);

@@ -1673,9 +1673,9 @@ const createWindow = () => {
      * but because `/accept?code=` is a link this file recognises AND the URL
      * openGroupInvite loads, and a route from one to the other is a loop waiting
      * for the day some navigation does come through. */
-    const link = isOwnPage(url) ? null : links.from(url);
+    const link = isWhatsAppWeb(url) ? null : links.from(url);
     if (link) { event.preventDefault(); openLink(link, 'a link in the page'); return; }
-    if (isWhatsAppSecure(url)) return;
+    if (isWhatsAppWeb(url)) return;
     event.preventDefault();
     openExternally(url);
   });
@@ -1707,11 +1707,9 @@ const isWhatsAppSecure = url => {
   }
 };
 
-/* Narrower than isWhatsApp, and deliberately so. faq.whatsapp.com is WhatsApp
-   as well, and it is still a page for a browser rather than for a window of
-   this client's: there is no address bar here and no way back. What this answers
-   true for is the client itself via secure HTTPS only. */
-const isOwnPage = url => {
+/* Strictly the WhatsApp Web client itself over secure HTTPS.
+   Used for main window navigation, popups, screen sharing, and media permissions. */
+const isWhatsAppWeb = url => {
   if (!url || typeof url !== 'string') return false;
   try {
     const parsed = new URL(url);
@@ -1720,6 +1718,8 @@ const isOwnPage = url => {
     return false;
   }
 };
+
+const isOwnPage = isWhatsAppWeb;
 
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'http:', 'mailto:', 'tel:']);
 
@@ -1977,7 +1977,7 @@ const adoptPopup = popup => {
   });
 
   contents.on('will-navigate', (event, url) => {
-    if (isWhatsAppSecure(url)) return;
+    if (isWhatsAppWeb(url)) return;
     event.preventDefault();
     openExternally(url);
   });
@@ -2926,7 +2926,7 @@ const wireIpc = () => {
       }
       if (key === 'lock.timeout') {
         const num = Number(value);
-        if (!Number.isInteger(num) || num <= 0 || num > 1440) {
+        if (!Number.isInteger(num) || num < 0 || num > 1440) {
           return { ok: false, why: 'invalid lock timeout' };
         }
         value = num;
@@ -3612,19 +3612,21 @@ const wirePermissions = ses => {
       return;
     }
     const requestingUrl = (details && details.requestingUrl) || '';
-    const isMainFrame = details ? (details.isMainFrame || !details.frame || !details.frame.parent) : true;
+    const isMainFrame = details?.isMainFrame === true;
     const documentUrl = (contents && contents.getURL()) || '';
 
-    // Sensitive permissions require top-level main frame AND secure WhatsApp origin
+    // Sensitive permissions require explicit top-level main frame AND WhatsApp Web
     if (SENSITIVE_PERMISSIONS.has(permission)) {
-      if (!isMainFrame || !isWhatsAppSecure(documentUrl)) {
-        console.warn('security: blocked sensitive permission "%s" for non-top or insecure frame: %s', permission, requestingUrl || documentUrl);
+      if (!isMainFrame || !isWhatsAppWeb(documentUrl)) {
+        console.warn('security: blocked sensitive permission "%s" for non-top or insecure frame: %s',
+          permission, requestingUrl || documentUrl);
         callback(false);
         return;
       }
       if (requestingUrl && !requestingUrl.startsWith('blob:') && !requestingUrl.startsWith('data:') && !requestingUrl.startsWith('about:')) {
-        if (!isWhatsAppSecure(requestingUrl)) {
-          console.warn('security: blocked sensitive permission "%s" for foreign requestingUrl: %s', permission, requestingUrl);
+        if (!isWhatsAppWeb(requestingUrl)) {
+          console.warn('security: blocked sensitive permission "%s" for foreign requestingUrl: %s',
+            permission, requestingUrl);
           callback(false);
           return;
         }
@@ -3634,26 +3636,29 @@ const wirePermissions = ses => {
     }
 
     const checkUrl = requestingUrl || documentUrl;
-    callback(isWhatsAppSecure(checkUrl));
+    callback(isWhatsAppWeb(checkUrl));
   });
 
   ses.setPermissionCheckHandler((contents, permission, origin, details) => {
     if (!ALLOWED_PERMISSIONS.has(permission)) return false;
-    const isMainFrame = details ? (details.isMainFrame || !details.frame || !details.frame.parent) : true;
+    const isMainFrame = details?.isMainFrame === true;
     if (SENSITIVE_PERMISSIONS.has(permission) && !isMainFrame) return false;
-    return isWhatsAppSecure(origin || (contents && contents.getURL()) || '');
+    return isWhatsAppWeb(origin || (contents && contents.getURL()) || '');
   });
 
   ses.setDevicePermissionHandler(details =>
-    isWhatsAppSecure((details && details.origin) || ''));
+    isWhatsAppWeb((details && details.origin) || ''));
 };
 
 const wireScreenSharing = ses => {
   ses.setDisplayMediaRequestHandler(async (request, callback) => {
     const origin = (request && request.securityOrigin) || '';
-    const isTopFrame = request && request.frame ? !request.frame.parent : true;
-    if (!isTopFrame || !isWhatsAppSecure(origin)) {
-      console.warn('screen sharing: blocked request from non-top or insecure origin "%s"', origin);
+    const hasValidFrame = !!(request && request.frame && !request.frame.parent);
+    const hasUserGesture = !!(request && request.userGesture === true);
+
+    if (!hasValidFrame || !hasUserGesture || !isWhatsAppWeb(origin)) {
+      console.warn('screen sharing: blocked invalid request (frame: %s, gesture: %s, origin: %s)',
+        hasValidFrame, hasUserGesture, origin);
       callback({ video: null });
       return;
     }
@@ -3664,46 +3669,53 @@ const wireScreenSharing = ses => {
       return;
     }
 
+    /* X11, where enumeration is local */
     try {
       const parentWin = (win && !win.isDestroyed()) ? win : null;
-      let confirmed = true;
-      try {
-        const choice = dialog.showMessageBoxSync(parentWin, {
-          type: 'question',
-          buttons: ['Share Screen', 'Cancel'],
-          defaultId: 0,
-          cancelId: 1,
-          title: 'Screen Sharing Request',
-          message: 'WhatsApp Web is requesting to share your screen.',
-          detail: 'Do you want to share your screen in this call?',
-          noLink: true,
-        });
-        confirmed = (choice === 0);
-      } catch (e) {}
-
-      if (!confirmed) {
-        console.log('screen sharing: declined by user');
-        callback({ video: null });
-        return;
-      }
 
       const sources = await Promise.race([
         desktopCapturer.getSources({ types: ['screen', 'window'], fetchWindowIcons: false }),
         new Promise(resolve => setTimeout(() => resolve(null), 5000)),
       ]);
-      if (!sources) {
-        console.warn('screen sharing: the desktop did not answer in time');
+
+      if (!sources || !sources.length) {
+        console.warn('screen sharing: no screen or window sources available');
         callback({ video: null });
         return;
       }
-      const source = sources.find(s => s.id.startsWith('screen:')) || sources[0];
-      if (!source) {
-        console.warn('screen sharing: nothing to share -- no screen or window source');
+
+      // Present actual screen & window sources to user with real picker
+      const available = sources.slice(0, 4);
+      const buttons = available.map(s => s.name || s.id);
+      buttons.push('Cancel');
+      const cancelId = buttons.length - 1;
+
+      let choice = -1;
+      try {
+        choice = dialog.showMessageBoxSync(parentWin, {
+          type: 'question',
+          buttons,
+          defaultId: 0,
+          cancelId,
+          title: 'Share Your Screen',
+          message: 'WhatsApp Web is requesting to share your screen or a window.',
+          detail: 'Select the screen or window you want to share:',
+          noLink: true,
+        });
+      } catch (e) {
+        console.warn('screen sharing dialog failed:', e.message);
+        choice = cancelId; // Fail-closed on dialog failure
+      }
+
+      if (choice < 0 || choice >= available.length || choice === cancelId) {
+        console.log('screen sharing: declined or cancelled by user');
         callback({ video: null });
         return;
       }
-      console.log('screen sharing: handing over "%s"', source.name);
-      callback({ video: source });
+
+      const selectedSource = available[choice];
+      console.log('screen sharing: user selected "%s"', selectedSource.name);
+      callback({ video: selectedSource });
     } catch (err) {
       console.warn('screen sharing failed: %s', err.message);
       callback({ video: null });

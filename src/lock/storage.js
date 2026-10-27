@@ -28,10 +28,12 @@ function loadSecurityState() {
 }
 
 function saveSecurityState(salt, hash) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
     fs.chmodSync(CONFIG_DIR, 0o700);
-  } catch (e) {}
+  } catch (err) {
+    throw new Error(`Failed to secure config directory: ${err.message}`);
+  }
 
   const data = {
     salt,
@@ -55,9 +57,14 @@ function saveSecurityState(salt, hash) {
 }
 
 function removeSecurityFile() {
-  try {
-    if (fs.existsSync(SECURITY_PATH)) fs.unlinkSync(SECURITY_PATH);
-  } catch (e) {}
+  if (fs.existsSync(SECURITY_PATH)) {
+    try {
+      fs.unlinkSync(SECURITY_PATH);
+    } catch (err) {
+      console.warn('Could not delete security.json:', err.message);
+      throw new Error(`Failed to delete security credentials file: ${err.message}`);
+    }
+  }
 }
 
 module.exports = {

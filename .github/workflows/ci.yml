@@ -29,6 +29,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Security audit dependencies
+        run: npm audit
+
       - name: Check JavaScript syntax
         shell: bash
         run: |
