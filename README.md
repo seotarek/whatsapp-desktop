@@ -26,6 +26,7 @@
 - **Flawless Arabic (BiDi) & English Alignment:** First-class bidirectional text engine. Automatically aligns mixed Arabic and English sentences accurately according to each paragraph's primary language.
 - **Distinct System Notifications:** Delivers native system banners per incoming message with sender photo and quick action triggers.
 - **Privacy Mode (Ctrl+Alt+P):** Instantly blurs messages, chats, and sensitive media when stepping away from the desk.
+- **Passcode Lock (App Lock):** Secure local PIN shield (hashed using PBKDF2 with SHA-256 and salt) to protect the window against local shoulder-surfing and casual interface access, automatically redacting notification previews while locked. *(Note: This provides a local UI privacy boundary and does not replace full-disk encryption).*
 - **Custom Fonts & Scaling:** Distinct font configurations for Arabic and Latin text directly from system-installed fonts.
 - **Hardware-Accelerated Smooth Scrolling:** Optimized rendering layers and smooth GPU composite acceleration.
 

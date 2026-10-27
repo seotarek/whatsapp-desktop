@@ -2625,14 +2625,50 @@ const quit = () => {
 };
 
 const wireIpc = () => {
-  ipcMain.on('wa:log', (event, message) => console.log('page: %s', message));
+  const isFromWindow = (event, targetWindow) => {
+    if (!event || !event.sender) return true;
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    return event.sender === targetWindow.webContents;
+  };
+
+  const isTopFrame = event => {
+    if (event && event.senderFrame && event.senderFrame.parent !== null) {
+      return false;
+    }
+    return true;
+  };
+
+  const isSettingsOrFonts = event => {
+    if (!event || !event.sender) return true;
+    return (isFromWindow(event, settingsWin) || isFromWindow(event, fontsWin)) && isTopFrame(event);
+  };
+
+  const isLockWindow = event => {
+    if (!event || !event.sender) return true;
+    return isFromWindow(event, lockWin) && isTopFrame(event);
+  };
+
+  const isAboutWindow = event => {
+    if (!event || !event.sender) return true;
+    return isFromWindow(event, aboutWin) && isTopFrame(event);
+  };
+
+  const isMainWindow = event => {
+    if (!event || !event.sender) return true;
+    return isFromWindow(event, win) && isTopFrame(event);
+  };
+
+  ipcMain.on('wa:log', (event, message) => {
+    if (!isMainWindow(event)) return;
+    console.log('page: %s', message);
+  });
 
   /* One small response at document-start, before either loading screen paints.
      The preload installs the current palette; waiting for did-finish-load lets
      the startup shimmer show through first. Read it again on every navigation
      so a reload uses the theme most recently chosen in Settings. */
   ipcMain.on('wa:initial-theme', event => {
-    if (!win || event.sender !== win.webContents) {
+    if (!isMainWindow(event)) {
       event.returnValue = null;
       return;
     }
@@ -2651,6 +2687,7 @@ const wireIpc = () => {
      chose to listen to never gets here -- the page settles that, where the
      element is (see watchCard in src/page/inject.js). */
   ipcMain.on('wa:media', (event, info) => {
+    if (!isMainWindow(event)) return;
     if (!mpris) return;
     const state = info && info.state;
     if (state === 'playing' || state === 'paused') {
@@ -2666,6 +2703,8 @@ const wireIpc = () => {
 
   /* The lock screen's own window, which is the only thing that can ask. */
   ipcMain.handle('lock:unlock', (event, passcode) => {
+    if (!isLockWindow(event)) return { ok: false };
+    if (typeof passcode !== 'string' || !passcode) return { ok: false };
     try {
       if (!lock.verify(passcode)) return { ok: false };
       unlockApp();
@@ -2677,35 +2716,51 @@ const wireIpc = () => {
     }
   });
 
-  ipcMain.handle('lock:get-theme', () => {
+  ipcMain.handle('lock:get-theme', event => {
+    if (!isLockWindow(event)) return 'dark';
     const asked = config.get('view.theme') || 'system';
     if (asked === 'system') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
     return asked === 'light' ? 'light' : 'dark';
   });
 
-  ipcMain.handle('lock:status', () => ({
-    hasPasscode: lock.hasPasscode(),
-    timeout: Number(config.get('lock.timeout')) || 0,
-    onSystemLock: config.get('lock.on-system-lock') !== false,
-  }));
+  ipcMain.handle('lock:status', event => {
+    if (!isSettingsOrFonts(event) && !isLockWindow(event)) {
+      return { hasPasscode: false, timeout: 0, onSystemLock: false };
+    }
+    return {
+      hasPasscode: lock.hasPasscode(),
+      timeout: Number(config.get('lock.timeout')) || 0,
+      onSystemLock: config.get('lock.on-system-lock') !== false,
+    };
+  });
 
   ipcMain.handle('lock:set-passcode', (event, passcode) => {
+    if (!isSettingsOrFonts(event)) return { ok: false, why: 'unauthorized' };
+    if (typeof passcode !== 'string') return { ok: false, why: 'invalid passcode format' };
     try { lock.setPasscode(passcode); return { ok: true }; }
     catch (err) { return { ok: false, why: err.message }; }
   });
 
   ipcMain.handle('lock:remove-passcode', (event, passcode) => {
+    if (!isSettingsOrFonts(event)) return { ok: false, why: 'unauthorized' };
+    if (typeof passcode !== 'string') return { ok: false, why: 'invalid passcode format' };
     try { lock.removePasscode(passcode); return { ok: true }; }
     catch (err) { return { ok: false, why: err.message }; }
   });
 
-  ipcMain.on('lock:now', () => {
+  ipcMain.on('lock:now', event => {
+    if (!isSettingsOrFonts(event)) return;
     if (!lockApp('the settings window')) console.log('lock: no passcode set, so nothing to lock');
   });
 
-  ipcMain.handle('custom-css:open', async () => { await openCustomCss(); return true; });
+  ipcMain.handle('custom-css:open', async event => {
+    if (!isSettingsOrFonts(event)) return false;
+    await openCustomCss();
+    return true;
+  });
 
-  ipcMain.handle('settings:get', () => {
+  ipcMain.handle('settings:get', event => {
+    if (!isSettingsOrFonts(event) && !isMainWindow(event)) return null;
     return {
       theme: config.get('view.theme') || 'system',
       autostart: autostart.isEnabled(),
@@ -2776,17 +2831,22 @@ const wireIpc = () => {
     };
   });
 
-  ipcMain.handle('settings:set-theme', (_, theme) => {
+  ipcMain.handle('settings:set-theme', (event, theme) => {
+    if (!isSettingsOrFonts(event) || typeof theme !== 'string') return false;
     setTheme(theme);
     return true;
   });
 
-  ipcMain.handle('settings:set-autostart', (_, enable) => {
+  ipcMain.handle('settings:set-autostart', (event, enable) => {
+    if (!isSettingsOrFonts(event)) return false;
     setAutostart(enable);
     return true;
   });
 
-  ipcMain.handle('settings:set', (_, key, value) => changeSetting(key, value));
+  ipcMain.handle('settings:set', (event, key, value) => {
+    if (!isSettingsOrFonts(event) || typeof key !== 'string') return { ok: false };
+    return changeSetting(key, value);
+  });
 
   /*
    * What the cache is holding, and a way to drop it.
@@ -2797,11 +2857,13 @@ const wireIpc = () => {
    * in storage this does not touch, so dropping it costs a slower first scroll
    * and nothing else.
    */
-  ipcMain.handle('storage:size', async () => {
+  ipcMain.handle('storage:size', async event => {
+    if (!isSettingsOrFonts(event)) return 0;
     try { return await session.defaultSession.getCacheSize(); } catch (e) { return 0; }
   });
 
-  ipcMain.handle('storage:clear', async () => {
+  ipcMain.handle('storage:clear', async event => {
+    if (!isSettingsOrFonts(event)) return { ok: false };
     const before = await session.defaultSession.getCacheSize().catch(() => 0);
     try {
       await session.defaultSession.clearCache();
@@ -2818,6 +2880,7 @@ const wireIpc = () => {
      preload is behind both of them, and a Fonts window that closed the settings
      instead would be the funniest bug in this file. */
   ipcMain.on('settings:close', event => {
+    if (!isSettingsOrFonts(event)) return;
     const asked = BrowserWindow.fromWebContents(event.sender);
     if (asked && !asked.isDestroyed()) asked.close();
   });
@@ -2827,7 +2890,8 @@ const wireIpc = () => {
      inherits FONTCONFIG_FILE and reads the document that was just rewritten;
      the file is the same path, so the retry guard at the top of this file sees
      nothing to do and the client comes back once, not twice. */
-  ipcMain.on('settings:restart', () => {
+  ipcMain.on('settings:restart', event => {
+    if (!isSettingsOrFonts(event)) return;
     console.log('restarting at the settings window\'s request');
     quitting = true;
     relaunch();
@@ -2838,7 +2902,8 @@ const wireIpc = () => {
      having here rather than only in a log: they are the first thing anybody
      asks for in a bug report, and they are the one thing on that window that can
      be selected and copied. */
-  ipcMain.handle('about:get', () => {
+  ipcMain.handle('about:get', event => {
+    if (!isAboutWindow(event)) return null;
     /* Opening this window is the moment somebody wants to know, so it asks --
        unless it was told minutes ago, in which case the answer it already has is
        the same answer and appears without a wait. */
@@ -2862,11 +2927,18 @@ const wireIpc = () => {
     };
   });
 
-  ipcMain.handle('about:check-update', () => new Promise(resolve => checkForUpdates(resolve)));
+  ipcMain.handle('about:check-update', event => {
+    if (!isAboutWindow(event)) return null;
+    return new Promise(resolve => checkForUpdates(resolve));
+  });
 
-  ipcMain.on('about:open', (_, where) => openSite(where));
+  ipcMain.on('about:open', (event, where) => {
+    if (!isAboutWindow(event)) return;
+    openSite(where);
+  });
 
-  ipcMain.on('about:close', () => {
+  ipcMain.on('about:close', event => {
+    if (!isAboutWindow(event)) return;
     if (aboutWin && !aboutWin.isDestroyed()) {
       aboutWin.close();
     }
@@ -2876,6 +2948,7 @@ const wireIpc = () => {
      process, so a family learned here takes effect on the next start -- which
      is the price of not having to guess what WhatsApp will name its font next. */
   ipcMain.on('wa:font-stack', (event, stack) => {
+    if (!isMainWindow(event)) return;
     if (!forcingFont() || typeof stack !== 'string') return;
     if (stack === pageFontStack) return;
     pageFontStack = stack;
@@ -2897,12 +2970,16 @@ const wireIpc = () => {
    * would do the very re-map the click had just been spared -- which is what
    * RAISE_COALESCE_MS was holding off, and holds off no longer now that the
    * click itself asks for nothing to coalesce with. */
-  ipcMain.on('wa:focus-request', () => showWindowForClick('the page asked for the focus'));
+  ipcMain.on('wa:focus-request', event => {
+    if (!isMainWindow(event)) return;
+    showWindowForClick('the page asked for the focus');
+  });
 
   /* The page could not find WhatsApp's own modules for opening a chat, so it is
      asked for the page WhatsApp serves for the purpose. A reload, and the last
      resort: it is what still works on the morning those module names change. */
   ipcMain.on('wa:link-unresolved', (event, chat) => {
+    if (!isMainWindow(event)) return;
     const phone = links.digitsOf(chat && chat.phone);
     if (!phone || !win || win.isDestroyed()) return;
     const query = 'phone=' + encodeURIComponent(phone) +
@@ -2916,6 +2993,7 @@ const wireIpc = () => {
      is the old behaviour entire, and it is reached only when the modal's module
      names have stopped answering -- a reload, which is why it is last. */
   ipcMain.on('wa:invite-unresolved', (event, invite) => {
+    if (!isMainWindow(event)) return;
     const code = links.inviteOf(invite && invite.code);
     if (!code || !win || win.isDestroyed()) return;
     console.log('loading WhatsApp\'s own invite page for %s', code);
@@ -2928,7 +3006,8 @@ const wireIpc = () => {
      and the same finding the #type probe in debug.js is written around.
      insertText goes in through the path a keyboard uses, and only this process
      can call it. */
-  ipcMain.on('wa:composer-ready', () => {
+  ipcMain.on('wa:composer-ready', event => {
+    if (!isMainWindow(event)) return;
     if (!pendingText || !win || win.isDestroyed()) return;
     win.webContents.focus();
     win.webContents.insertText(pendingText);
@@ -2940,7 +3019,8 @@ const wireIpc = () => {
      makes a banner per message possible at all. The document title cannot do that
      job: its number counts unread CHATS, so the second and third message from one
      person leave "(1) WhatsApp" exactly as it was and nothing fires. */
-  ipcMain.on('wa:arrival', () => {
+  ipcMain.on('wa:arrival', event => {
+    if (!isMainWindow(event)) return;
     /* Refused outright while the store is answering. This nudge is the chat-list
        watcher's, and the watcher stops sending it then -- this is the second
        half of that gate, so a report already in flight when the store came up
@@ -2955,6 +3035,7 @@ const wireIpc = () => {
      and handed over with the sender's picture already fetched. The click goes
      back to the page, whose own handler opens the conversation. */
   ipcMain.on('wa:page-notification', (event, note) => {
+    if (!isMainWindow(event)) return;
     if (storeLive) return;
     if (!note || !config.get('notifications.enabled')) return;
     /* The page says whether this chat is a group, because WhatsApp's own body
@@ -3030,6 +3111,7 @@ const wireIpc = () => {
    * unread left is the message having been read, and the banner goes.
    */
   ipcMain.on('wa:page-notification-close', (event, note) => {
+    if (!isMainWindow(event)) return;
     if (!note) return;
     const banner = pageBanners.get(note.id);
     pageBanners.delete(note.id);
@@ -3047,6 +3129,7 @@ const wireIpc = () => {
   /* ------------------------------------------------ WhatsApp's own store */
 
   ipcMain.on('wa:store-ready', (event, state) => {
+    if (!isMainWindow(event)) return;
     const ready = !!(state && state.ready);
     if (ready === storeLive) return;
     storeLive = ready;
@@ -3070,6 +3153,7 @@ const wireIpc = () => {
      message reading "the link is https://..." came from somebody called "the
      link is https", are both gone with the body they were reading. */
   ipcMain.on('wa:store-message', (event, note) => {
+    if (!isMainWindow(event)) return;
     if (!note || !note.chat || !note.title) return;
     if (!storeBannersAreOurs()) return;
 
@@ -3158,6 +3242,7 @@ const wireIpc = () => {
    * this client has never muted that -- playing one here would be a second
    * sound over the first. */
   ipcMain.on('wa:store-ringing', (event, note) => {
+    if (!isMainWindow(event)) return;
     if (!note || !note.chat || !note.title || !note.call) return;
     if (!storeBannersAreOurs()) return;
 
@@ -3191,6 +3276,7 @@ const wireIpc = () => {
      the call that was missed, and then everything held while it rang -- is not
      this handler's business. */
   ipcMain.on('wa:store-ring-over', (event, note) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive || !note || !note.call || !banners) return;
     ringingBanners.delete('ring' + SEP + note.call);
     if (banners.closeMessage('ring' + SEP + note.call))
@@ -3198,7 +3284,8 @@ const wireIpc = () => {
                   chatTitles.get(note.chat) || note.chat);
   });
 
-  ipcMain.on('wa:store-open-arrival', () => {
+  ipcMain.on('wa:store-open-arrival', event => {
+    if (!isMainWindow(event)) return;
     if (!storeBannersAreOurs()) return;
     console.log('a message in the chat on screen: nothing raised, and nothing played');
   });
@@ -3206,16 +3293,19 @@ const wireIpc = () => {
   /* Read. Here, on the phone, or on another desktop -- WhatsApp does not say
      which and it does not matter. */
   ipcMain.on('wa:store-read', (event, state) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive || !state) return;
     storeRead(state.chat, Number(state.unread) || 0);
   });
 
   ipcMain.on('wa:store-active', (event, state) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive || !state) return;
     storeActive(state.chat || '');
   });
 
   ipcMain.on('wa:store-unread', (event, map) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive) return;
     storeUnread(map);
   });
@@ -3225,6 +3315,7 @@ const wireIpc = () => {
      announcing that a message the user never read has been deleted tells them
      about a message twice over and about its contents not at all. */
   ipcMain.on('wa:store-gone', (event, state) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive || !state || !state.msg || !banners) return;
     const closed = banners.closeMessage(state.msg);
     if (!closed) return;
@@ -3238,6 +3329,7 @@ const wireIpc = () => {
   });
 
   ipcMain.on('wa:store-count', (event, count) => {
+    if (!isMainWindow(event)) return;
     if (!storeLive || !count || typeof count.messages !== 'number') return;
     unreadMessages = count.messages;
     setBadge(count.messages);
@@ -3250,6 +3342,7 @@ const wireIpc = () => {
      refused for the first few seconds of a banner's life, and it is sent only
      when the answer changes, so those few seconds used to be for ever. */
   ipcMain.on('wa:open-chat', (event, name) => {
+    if (!isMainWindow(event)) return;
     if (storeLive) return;
     openChat = typeof name === 'string' ? name : '';
     withdrawOpen();
@@ -3261,6 +3354,7 @@ const wireIpc = () => {
      screen -- and it stops being unread whether it was read here or on the
      phone, because WhatsApp Web clears the pill either way. */
   ipcMain.on('wa:unread-chats', (event, names) => {
+    if (!isMainWindow(event)) return;
     if (storeLive) return;
     if (!Array.isArray(names) || !banners) return;
     unreadChatNames = new Set(names);
@@ -3276,6 +3370,7 @@ const wireIpc = () => {
   /* How many messages are waiting, counted off the unread pills rather than
      inferred from the document title. This is the number the badge wants. */
   ipcMain.on('wa:unread-count', (event, count) => {
+    if (!isMainWindow(event)) return;
     if (storeLive) return;
     if (!count || typeof count.messages !== 'number') return;
     unreadMessages = count.messages;

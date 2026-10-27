@@ -84,7 +84,7 @@ ipcMain.handle('lock:status', () => ({ hasPasscode: false, timeout: 15, onSystem
 ipcMain.handle('about:get', () => ({
   name: 'WhatsApp',
   version: manifest.version,
-  icon: '../data/icons/128/apps/io.github.shehawey.whatsapp-desktop.png',
+  icon: '../data/icons/128/apps/io.github.seotarek.whatsapp-desktop.png',
   license: manifest.license,
   author: String(manifest.author || '').replace(/\s*<[^>]*>/, ''),
   electron: process.versions.electron,

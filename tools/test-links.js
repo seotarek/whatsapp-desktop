@@ -167,7 +167,7 @@ check('and nothing else is named, because everything else has a browser', () => 
 
 check('the scheme is not claimed when the owner has said not to', () => {
   const app = { isDefaultProtocolClient: () => { throw new Error('should not be asked'); } };
-  assert.strictEqual(links.claim(app, 'io.github.shehawey.whatsapp-desktop', { enabled: false }),
+  assert.strictEqual(links.claim(app, 'io.github.seotarek.whatsapp-desktop', { enabled: false }),
                      'not asked for');
 });
 
@@ -175,8 +175,8 @@ check('and a claim names the desktop file, which is where Electron reads it from
   const before = process.env.CHROME_DESKTOP;
   delete process.env.CHROME_DESKTOP;
   const app = { isDefaultProtocolClient: () => false, setAsDefaultProtocolClient: () => true };
-  assert.strictEqual(links.claim(app, 'io.github.shehawey.whatsapp-desktop'), 'claimed');
-  assert.strictEqual(process.env.CHROME_DESKTOP, 'io.github.shehawey.whatsapp-desktop.desktop');
+  assert.strictEqual(links.claim(app, 'io.github.seotarek.whatsapp-desktop'), 'claimed');
+  assert.strictEqual(process.env.CHROME_DESKTOP, 'io.github.seotarek.whatsapp-desktop.desktop');
   if (before === undefined) delete process.env.CHROME_DESKTOP;
   else process.env.CHROME_DESKTOP = before;
 });
@@ -186,7 +186,7 @@ check('one that already holds the scheme does not ask again', () => {
     isDefaultProtocolClient: () => true,
     setAsDefaultProtocolClient: () => { throw new Error('should not be asked'); },
   };
-  assert.strictEqual(links.claim(app, 'io.github.shehawey.whatsapp-desktop'), 'already ours');
+  assert.strictEqual(links.claim(app, 'io.github.seotarek.whatsapp-desktop'), 'already ours');
 });
 
 for (const line of ok) console.log('  ok   ' + line);

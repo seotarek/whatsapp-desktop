@@ -21,7 +21,8 @@ from gi.repository import GdkPixbuf
 import cairo
 
 SIZES = (16, 22, 24, 32, 48, 64, 128, 256)
-APP_ID = "io.github.shehawey.whatsapp-desktop"
+APP_ID = "io.github.seotarek.whatsapp-desktop"
+LEGACY_APP_ID = "io.github.shehawey.whatsapp-desktop"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ICONS = ROOT / "data" / "icons"
@@ -83,16 +84,20 @@ def main() -> int:
     for size in SIZES:
         app_icon = render(APP_MASTER, size)
         write(app_icon, size, "apps", f"{APP_ID}.png")
+        write(app_icon, size, "apps", f"{LEGACY_APP_ID}.png")
         write(app_icon, size, "apps", "whatsapp-desktop.png")
         write(app_icon, size, "apps", "WhatsApp.png")
 
         tray = render(TRAY_MASTER, size)
         # Both contexts: SNI hosts disagree on which one they search.
         write(tray, size, "apps", f"{APP_ID}-tray.png")
+        write(tray, size, "apps", f"{LEGACY_APP_ID}-tray.png")
         write(tray, size, "apps", "whatsapp-desktop-tray.png")
         write(tray, size, "status", f"{APP_ID}-tray.png")
+        write(tray, size, "status", f"{LEGACY_APP_ID}-tray.png")
         write(tray, size, "status", "whatsapp-desktop-tray.png")
         write(with_badge(tray, size), size, "status", f"{APP_ID}-tray-attention.png")
+        write(with_badge(tray, size), size, "status", f"{LEGACY_APP_ID}-tray-attention.png")
         write(with_badge(tray, size), size, "status", "whatsapp-desktop-tray-attention.png")
 
     total = sum(1 for _ in ICONS.rglob("*.png"))

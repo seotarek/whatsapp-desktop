@@ -19,4 +19,4 @@ wa_fonts="${XDG_DATA_HOME:-$HOME/.local/share}/whatsapp-desktop/fonts.conf"
 [ ! -f "$wa_fonts" ] || export FONTCONFIG_FILE="$wa_fonts"
 
 exec '@ELECTRON_BIN@' '@APPDIR@' \
-  --class=io.github.shehawey.whatsapp-desktop --name=whatsapp-desktop "$@"
+  --class=io.github.seotarek.whatsapp-desktop --name=whatsapp-desktop "$@"

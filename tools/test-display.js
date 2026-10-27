@@ -72,7 +72,7 @@ assert.strictEqual(native.result.onWayland, true, 'the selected Wayland backend 
 assert.deepStrictEqual(native.relaunched, [], 'the default Wayland launch is left alone');
 assert.strictEqual(native.switches.has('ozone-platform-hint'), false, 'the removed Ozone hint is not added');
 assert.deepStrictEqual(native.switches.get('enable-features').split(','),
-  ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer', 'WaylandWindowDecorations'],
+  ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer', 'CanvasOopRasterization', 'BackForwardCache', 'V8OptimizeJavascript', 'WaylandWindowDecorations'],
   'Wayland decorations and the existing Chromium features are kept together');
 
 const x11 = run({ platform: 'x11', forceX11: true,
@@ -80,7 +80,7 @@ const x11 = run({ platform: 'x11', forceX11: true,
 assert.deepStrictEqual(x11.relaunched, [], 'X11 already selected by Electron needs no restart');
 assert.strictEqual(x11.result.onWayland, false);
 assert.deepStrictEqual(x11.switches.get('enable-features').split(','),
-  ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer'],
+  ['MemoryPurgeOnFreezeLimit', 'WebRTCPipeWireCapturer', 'CanvasOopRasterization', 'BackForwardCache', 'V8OptimizeJavascript'],
   'X11 keeps memory and screen-sharing features without Wayland decorations');
 
 console.log('display startup checks pass');

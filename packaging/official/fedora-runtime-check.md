@@ -30,7 +30,7 @@ Observed behavior:
   and read back through Settings IPC. The font catalogue was populated.
 - The main window's hide/show actions completed.
 - The native main-window `WM_CLASS` was
-  `io.github.shehawey.whatsapp-desktop`, matching the Fedora SPEC revision 2
+  `io.github.seotarek.whatsapp-desktop`, matching the Fedora SPEC revision 2
   desktop entry. Electron 40's earlier observed class was `WhatsApp`.
 - The existing application tests and source-only installation checks passed
   in Rawhide. The staged application contained no bundled runtime.

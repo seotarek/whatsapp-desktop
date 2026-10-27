@@ -11,7 +11,7 @@ import pathlib
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ICON = ROOT / "data/icons/256/apps/io.github.shehawey.whatsapp-desktop.png"
+ICON = ROOT / "data/icons/256/apps/io.github.seotarek.whatsapp-desktop.png"
 OUT = ROOT / "docs/assets/og.png"
 
 W, H = 1200, 630

@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="whatsapp-system-package-") as tmp:
     subprocess.run(["make", "install-system", "PREFIX=/usr", f"DESTDIR={stage}",
                     f"SYSTEM_ELECTRON={runtime}"], cwd=source, check=True)
     launcher = stage / "usr/bin/whatsapp-desktop"
-    desktop = stage / "usr/share/applications/io.github.shehawey.whatsapp-desktop.desktop"
+    desktop = stage / "usr/share/applications/io.github.seotarek.whatsapp-desktop.desktop"
     assert "StartupWMClass=WhatsApp\n" in desktop.read_text()
     expected_version = json.loads((root / "package.json").read_text())["version"]
     assert subprocess.check_output([launcher, "--version"], text=True).strip() == \
@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="whatsapp-system-package-") as tmp:
     ], env=env, text=True))
     assert result["argv"] == [
         "/usr/share/whatsapp-desktop",
-        "--class=io.github.shehawey.whatsapp-desktop", "--name=whatsapp-desktop",
+        "--class=io.github.seotarek.whatsapp-desktop", "--name=whatsapp-desktop",
         "--hidden", "whatsapp://send?phone=123&text=hello world"
     ]
     assert result["as_node"] is None
@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="whatsapp-system-package-") as tmp:
     assert "--no-sandbox" not in result["argv"]
 
     subprocess.run(["desktop-file-validate", stage / "usr/share/applications/"
-                    "io.github.shehawey.whatsapp-desktop.desktop"], check=True)
+                    "io.github.seotarek.whatsapp-desktop.desktop"], check=True)
     subprocess.run(["appstreamcli", "validate", "--no-net", stage / "usr/share/metainfo/"
-                    "io.github.shehawey.whatsapp-desktop.metainfo.xml"], check=True)
+                    "io.github.seotarek.whatsapp-desktop.metainfo.xml"], check=True)
 print("source-only installation and launcher checks pass")

@@ -18,7 +18,7 @@ const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 const fonts = path.join(env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'whatsapp-desktop/fonts.conf');
 if (fs.existsSync(fonts)) env.FONTCONFIG_FILE = fonts;
-const child = spawn(require('electron'), [path.resolve(__dirname, '..'), '--class=io.github.shehawey.whatsapp-desktop', '--name=whatsapp-desktop', ...args], { env, stdio: 'inherit' });
+const child = spawn(require('electron'), [path.resolve(__dirname, '..'), '--class=io.github.seotarek.whatsapp-desktop', '--name=whatsapp-desktop', ...args], { env, stdio: 'inherit' });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
 child.on('error', error => { console.error(error.message); process.exitCode = 1; });
 child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 1); });
