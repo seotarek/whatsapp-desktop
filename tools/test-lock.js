@@ -23,6 +23,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-lock-'));
 process.env.XDG_CONFIG_HOME = sandbox;
 
 const { LockManager } = require('../src/lock.js');
+const storage = require('../src/lock/storage.js');
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -211,11 +212,97 @@ let threwOnRemove = false;
 try {
   rollbackLock.removePasscode('secret123');
 } catch (e) {
-  threwOnRemove = e.message.includes('Failed to persist lock removal');
+  threwOnRemove = e.message.includes('Failed to persist lock configuration');
 }
 check('removePasscode throws when config save fails', threwOnRemove, true);
 check('lock state retained after failed removePasscode', rollbackLock.hasPasscode(), true);
 check('lock.enabled remains true after failed removePasscode', workingConfig.get('lock.enabled'), true);
+
+// Clean removal after failure
+workingConfig.failSave = false;
+rollbackLock.removePasscode('secret123');
+check('clean removal removes credentials after rollback test', rollbackLock.hasPasscode(), false);
+check('clean removal sets lock.enabled to false', workingConfig.get('lock.enabled'), false);
+
+/* Authority: security.json is the single source of truth */
+const authConfig = fake({ 'lock.enabled': false });
+const authLock = new LockManager(authConfig);
+authLock.setPasscode('truth123');
+check('passcode is active', authLock.isEnabled(), true);
+check('lock.enabled set to true after setPasscode', authConfig.get('lock.enabled'), true);
+
+// Tamper config to simulate crash or user editing config to false
+authConfig.set('lock.enabled', false);
+
+// Fresh manager startup: must read security.json, lock the app, keep isEnabled = true, and heal config
+const restartedLock = new LockManager(authConfig);
+check('valid security.json locks app on load even if lock.enabled was false', restartedLock.isLocked, true);
+check('isEnabled returns true on valid credentials even if lock.enabled was false', restartedLock.isEnabled(), true);
+check('config key is healed to lock.enabled = true', authConfig.get('lock.enabled'), true);
+
+restartedLock.removePasscode('truth123');
+check('after clean removal, isLocked is false', restartedLock.isLocked, false);
+check('after clean removal, isEnabled is false', restartedLock.isEnabled(), false);
+
+/* Edge case: removeSecurityFile throws during removePasscode */
+const unremovableLock = new LockManager(fake());
+unremovableLock.setPasscode('keepme123');
+const origRemove = storage.removeSecurityFile;
+storage.removeSecurityFile = () => {
+  throw new Error('EPERM: operation not permitted');
+};
+let threwOnRemoveFile = false;
+try {
+  unremovableLock.removePasscode('keepme123');
+} catch (e) {
+  threwOnRemoveFile = e.message.includes('Failed to remove credentials file');
+} finally {
+  storage.removeSecurityFile = origRemove;
+}
+check('removePasscode throws when credentials file removal fails', threwOnRemoveFile, true);
+check('passcode retained after credentials file removal failure', unremovableLock.hasPasscode(), true);
+unremovableLock.removePasscode('keepme123');
+check('unremovableLock cleaned up after test', unremovableLock.hasPasscode(), false);
+
+/* Edge case: failure of restoration during removePasscode config failure */
+const restoreFailConfig = fake();
+const restoreFailLock = new LockManager(restoreFailConfig);
+restoreFailLock.setPasscode('restorefail');
+restoreFailConfig.failSave = true;
+const origSaveState = storage.saveSecurityState;
+storage.saveSecurityState = () => {
+  throw new Error('Disk full');
+};
+let threwBoth = false;
+try {
+  restoreFailLock.removePasscode('restorefail');
+} catch (e) {
+  threwBoth = e.message.includes('and failed to restore credentials file: Disk full');
+} finally {
+  storage.saveSecurityState = origSaveState;
+}
+check('removePasscode surfaces both errors when restore fails', threwBoth, true);
+restoreFailConfig.failSave = false;
+try { restoreFailLock.removePasscode('restorefail'); } catch (_) {}
+try { storage.removeSecurityFile(); } catch (_) {}
+
+/* Edge case: failure of rollback during setPasscode config failure */
+const setFailConfig = fake();
+setFailConfig.failSave = true;
+const setFailLock = new LockManager(setFailConfig);
+storage.removeSecurityFile = () => {
+  throw new Error('ReadOnlyFS');
+};
+let threwSetRollback = false;
+try {
+  setFailLock.setPasscode('setfail');
+} catch (e) {
+  threwSetRollback = e.message.includes('and rollback failed: ReadOnlyFS');
+} finally {
+  storage.removeSecurityFile = origRemove;
+}
+check('setPasscode surfaces rollback failure when rollback throws', threwSetRollback, true);
+try { storage.removeSecurityFile(); } catch (_) {}
 
 fs.rmSync(sandbox, { recursive: true, force: true });
 

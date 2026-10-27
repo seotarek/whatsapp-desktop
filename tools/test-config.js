@@ -103,6 +103,64 @@ check('config file written with 0600 permissions', (statCfg.mode & 0o777).toStri
 const statDir = fs.statSync(path.dirname(CONFIG_PATH));
 check('config dir created with 0700 permissions', (statDir.mode & 0o777).toString(8), '700');
 
+/* Simulated failure during writeSync (e.g. ENOSPC / out of disk space) */
+const beforeTheme = new Config().get('view.theme');
+const origWriteSync = fs.writeSync;
+const testFailureCfg = new Config();
+testFailureCfg.set('view.theme', 'dark');
+
+fs.writeSync = () => {
+  const err = new Error('ENOSPC: no space left on device');
+  err.code = 'ENOSPC';
+  throw err;
+};
+
+try {
+  const res = testFailureCfg.save();
+  check('save() returns false when writeSync throws ENOSPC', res, false);
+} finally {
+  fs.writeSync = origWriteSync;
+}
+
+const tmpFilesAfterWriteFail = fs.readdirSync(path.dirname(CONFIG_PATH)).filter(f => f.includes('.tmp'));
+check('temporary file cleaned up after write failure', tmpFilesAfterWriteFail.length, 0);
+
+/* Simulated failure when throwOnError: true is specified */
+fs.writeSync = () => {
+  throw new Error('EIO: i/o error');
+};
+let threwOnError = false;
+try {
+  testFailureCfg.save({ throwOnError: true });
+} catch (e) {
+  threwOnError = e.message.includes('Could not write config file');
+} finally {
+  fs.writeSync = origWriteSync;
+}
+check('save({ throwOnError: true }) re-throws descriptive error on write failure', threwOnError, true);
+
+/* Simulated failure during renameSync (e.g. busy / cross-device link) */
+const origRenameSync = fs.renameSync;
+fs.renameSync = () => {
+  const err = new Error('EBUSY: resource busy or locked');
+  err.code = 'EBUSY';
+  throw err;
+};
+try {
+  const res = testFailureCfg.save();
+  check('save() returns false when renameSync fails', res, false);
+} finally {
+  fs.renameSync = origRenameSync;
+}
+
+const tmpFilesAfterRenameFail = fs.readdirSync(path.dirname(CONFIG_PATH)).filter(f => f.includes('.tmp'));
+check('temporary file cleaned up after rename failure', tmpFilesAfterRenameFail.length, 0);
+
+// Verify original config file still reads correctly and was not damaged by failures
+const survivingCfg = new Config();
+check('original config file remained intact and undamaged after simulated failures',
+      survivingCfg.get('view.theme'), beforeTheme);
+
 fs.rmSync(sandbox, { recursive: true, force: true });
 
 console.log(failures ? `\n${failures} config check(s) failed` : '\nconfig checks pass');

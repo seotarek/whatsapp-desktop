@@ -470,6 +470,235 @@ async function run() {
     guiFallbackResult.video && guiFallbackResult.video.id === "screen:0:0"
   );
 
+  /* ------------------------------------------------ share-picker.html DOM Functional Tests */
+  const htmlContent = fs.readFileSync(path.join(__dirname, "..", "src", "share-picker.html"), "utf8");
+  const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(htmlContent);
+  check("share-picker.html contains client script block", !!scriptMatch);
+  const scriptCode = scriptMatch[1];
+
+  function createPickerDomEnv() {
+    class MockElement {
+      constructor(tag, id = "", className = "") {
+        this.tagName = tag.toUpperCase();
+        this.id = id;
+        this.className = className;
+        const classSet = new Set(className ? className.split(/\s+/).filter(Boolean) : []);
+        const self = this;
+        this.classList = {
+          add(...cls) { cls.forEach(c => classSet.add(c)); self.className = Array.from(classSet).join(' '); },
+          remove(...cls) { cls.forEach(c => classSet.delete(c)); self.className = Array.from(classSet).join(' '); },
+          toggle(cls, force) {
+            if (force === undefined) {
+              if (classSet.has(cls)) classSet.delete(cls);
+              else classSet.add(cls);
+            } else if (force) {
+              classSet.add(cls);
+            } else {
+              classSet.delete(cls);
+            }
+            self.className = Array.from(classSet).join(' ');
+          },
+          contains(cls) { return classSet.has(cls); }
+        };
+        this.children = [];
+        this.dataset = {};
+        this.listeners = {};
+        this.disabled = false;
+        this._innerHTML = "";
+        this.textContent = "";
+        this.title = "";
+        this.src = "";
+      }
+      set innerHTML(val) {
+        this._innerHTML = val;
+        this.children = [];
+      }
+      get innerHTML() {
+        return this._innerHTML;
+      }
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      }
+      addEventListener(event, fn) {
+        this.listeners[event] = this.listeners[event] || [];
+        this.listeners[event].push(fn);
+      }
+      click() {
+        (this.listeners["click"] || []).forEach(fn => fn({ target: this }));
+      }
+      dblclick() {
+        (this.listeners["dblclick"] || []).forEach(fn => fn({ target: this }));
+      }
+    }
+
+    const listEl = new MockElement("main", "sourcesList");
+    const shareBtn = new MockElement("button", "shareBtn", "btn btn-primary");
+    shareBtn.disabled = true;
+    const cancelBtn = new MockElement("button", "cancelBtn", "btn btn-secondary");
+    const filterAll = new MockElement("button", "", "filter-btn active");
+    filterAll.dataset.filter = "all";
+    const filterScreen = new MockElement("button", "", "filter-btn");
+    filterScreen.dataset.filter = "screen";
+    const filterWindow = new MockElement("button", "", "filter-btn");
+    filterWindow.dataset.filter = "window";
+    const filterBtns = [filterAll, filterScreen, filterWindow];
+
+    let selectedApiIndex = null;
+    let cancelled = false;
+    let onSourcesCallback = null;
+
+    const mockDoc = {
+      activeElement: cancelBtn,
+      getElementById(id) {
+        if (id === "sourcesList") return listEl;
+        if (id === "shareBtn") return shareBtn;
+        if (id === "cancelBtn") return cancelBtn;
+        return null;
+      },
+      querySelectorAll(selector) {
+        if (selector === ".filter-btn") return filterBtns;
+        if (selector === ".source-card") return listEl.children;
+        return [];
+      },
+      createElement(tag) {
+        return new MockElement(tag);
+      }
+    };
+
+    const windowListeners = {};
+    const mockWindow = {
+      addEventListener(event, fn) {
+        windowListeners[event] = windowListeners[event] || [];
+        windowListeners[event].push(fn);
+      },
+      dispatchKeydown(key) {
+        (windowListeners["keydown"] || []).forEach(fn => fn({ key }));
+      },
+      pickerApi: {
+        onSources(fn) {
+          onSourcesCallback = fn;
+        },
+        select(idx) {
+          selectedApiIndex = idx;
+        },
+        cancel() {
+          cancelled = true;
+        }
+      }
+    };
+
+    const ctx = vm.createContext({
+      document: mockDoc,
+      window: mockWindow,
+      console,
+      Number,
+      Array,
+      Boolean,
+    });
+
+    vm.runInContext(scriptCode, ctx);
+
+    return {
+      listEl,
+      shareBtn,
+      cancelBtn,
+      filterBtns: { all: filterAll, screen: filterScreen, window: filterWindow },
+      mockDoc,
+      mockWindow,
+      loadSources: (srcs) => onSourcesCallback && onSourcesCallback(srcs),
+      getSelectedApiIndex: () => selectedApiIndex,
+      isCancelled: () => cancelled,
+    };
+  }
+
+  const domEnv = createPickerDomEnv();
+  const sampleSources = [
+    { index: 0, id: "screen:0:0", name: "Entire Screen 1", isScreen: true, thumbnail: "data:image/png;base64,abc" },
+    { index: 1, id: "window:1:0", name: "Visual Studio Code", isScreen: false, thumbnail: "" },
+    { index: 2, id: "window:2:0", name: "Terminal", isScreen: false, thumbnail: "" },
+  ];
+
+  // 1. Initial render
+  domEnv.loadSources(sampleSources);
+  check("share-picker DOM renders cards for all sources initially",
+    domEnv.listEl.children.length === 3
+  );
+  check("share-picker DOM initial share button is disabled",
+    domEnv.shareBtn.disabled === true
+  );
+
+  // 2. Filter tabs
+  domEnv.filterBtns.screen.click();
+  check("share-picker DOM filter by 'screen' shows only screen sources",
+    domEnv.listEl.children.length === 1 && domEnv.listEl.children[0].dataset.index === 0
+  );
+  domEnv.filterBtns.window.click();
+  check("share-picker DOM filter by 'window' shows only window sources",
+    domEnv.listEl.children.length === 2 && domEnv.listEl.children[0].dataset.index === 1
+  );
+  domEnv.filterBtns.all.click();
+  check("share-picker DOM filter by 'all' restores full source list",
+    domEnv.listEl.children.length === 3
+  );
+
+  // 3. Selection
+  const firstCard = domEnv.listEl.children[0];
+  firstCard.click();
+  check("share-picker DOM clicking card selects it and enables share button",
+    firstCard.classList.contains("selected") === true &&
+    domEnv.shareBtn.disabled === false
+  );
+
+  // 4. Share button click
+  domEnv.shareBtn.click();
+  check("share-picker DOM clicking share button submits selected source index",
+    domEnv.getSelectedApiIndex() === 0
+  );
+
+  // 5. Double click on card triggers immediate share
+  const envDbl = createPickerDomEnv();
+  envDbl.loadSources(sampleSources);
+  envDbl.listEl.children[1].dblclick();
+  check("share-picker DOM double clicking card selects and submits immediately",
+    envDbl.getSelectedApiIndex() === 1
+  );
+
+  // 6. Cancel button click
+  const envCancel = createPickerDomEnv();
+  envCancel.loadSources(sampleSources);
+  envCancel.cancelBtn.click();
+  check("share-picker DOM clicking cancel button triggers pickerApi.cancel()",
+    envCancel.isCancelled() === true
+  );
+
+  // 7. Keyboard: Escape triggers cancel
+  const envEsc = createPickerDomEnv();
+  envEsc.loadSources(sampleSources);
+  envEsc.mockWindow.dispatchKeydown("Escape");
+  check("share-picker DOM pressing Escape triggers pickerApi.cancel()",
+    envEsc.isCancelled() === true
+  );
+
+  // 8. Keyboard: Enter on active Cancel button triggers cancel
+  const envEnterCancel = createPickerDomEnv();
+  envEnterCancel.loadSources(sampleSources);
+  envEnterCancel.mockDoc.activeElement = envEnterCancel.cancelBtn;
+  envEnterCancel.mockWindow.dispatchKeydown("Enter");
+  check("share-picker DOM pressing Enter while Cancel is active triggers cancel",
+    envEnterCancel.isCancelled() === true && envEnterCancel.getSelectedApiIndex() === null
+  );
+
+  // 9. Keyboard: Enter when card is selected submits share
+  const envEnterShare = createPickerDomEnv();
+  envEnterShare.loadSources(sampleSources);
+  envEnterShare.mockDoc.activeElement = envEnterShare.shareBtn;
+  envEnterShare.listEl.children[2].click();
+  envEnterShare.mockWindow.dispatchKeydown("Enter");
+  check("share-picker DOM pressing Enter with selected item submits share",
+    envEnterShare.getSelectedApiIndex() === 2
+  );
+
   console.log("\npermissions and screenshare security checks pass");
   if (failures > 0) process.exit(1);
 }

@@ -392,10 +392,24 @@ class Config {
     try {
       fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
       fs.chmodSync(CONFIG_DIR, 0o700);
-      fs.writeFileSync(tempPath, text, { mode: 0o600 });
+      const fd = fs.openSync(tempPath, 'w', 0o600);
+      try {
+        fs.writeSync(fd, text, 0, 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.chmodSync(tempPath, 0o600);
       fs.renameSync(tempPath, CONFIG_PATH);
       fs.chmodSync(CONFIG_PATH, 0o600);
+      try {
+        const dirFd = fs.openSync(CONFIG_DIR, 'r');
+        try {
+          fs.fsyncSync(dirFd);
+        } finally {
+          fs.closeSync(dirFd);
+        }
+      } catch (_) {}
       return true;
     } catch (e) {
       try {

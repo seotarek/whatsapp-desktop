@@ -13,12 +13,7 @@
 'use strict';
 
 const { deriveHash, generateSalt, verifyHash } = require('./lock/crypto.js');
-const {
-  SECURITY_PATH,
-  loadSecurityState,
-  saveSecurityState,
-  removeSecurityFile,
-} = require('./lock/storage.js');
+const storage = require('./lock/storage.js');
 
 class LockManager {
   constructor(config) {
@@ -33,18 +28,32 @@ class LockManager {
   }
 
   load() {
-    const { salt, hash } = loadSecurityState();
+    const { salt, hash } = storage.loadSecurityState();
     if (salt && hash) {
       this.salt = salt;
       this.hash = hash;
-      if (this.config.get('lock.enabled') !== false) {
-        this.isLocked = true;
+      this.isLocked = true;
+      if (this.config.get('lock.enabled') !== true) {
+        this.config.set('lock.enabled', true);
+        try {
+          this.config.save();
+        } catch (_) {}
+      }
+    } else {
+      this.salt = null;
+      this.hash = null;
+      this.isLocked = false;
+      if (this.config.get('lock.enabled') === true) {
+        this.config.set('lock.enabled', false);
+        try {
+          this.config.save();
+        } catch (_) {}
       }
     }
   }
 
   save() {
-    saveSecurityState(this.salt, this.hash);
+    storage.saveSecurityState(this.salt, this.hash);
   }
 
   hasPasscode() {
@@ -52,7 +61,7 @@ class LockManager {
   }
 
   isEnabled() {
-    return this.hasPasscode() && this.config.get('lock.enabled') !== false;
+    return this.hasPasscode();
   }
 
   setPasscode(newPin, currentPin) {
@@ -76,7 +85,7 @@ class LockManager {
     const prevEnabled = this.config.get('lock.enabled');
 
     try {
-      saveSecurityState(salt, derived);
+      storage.saveSecurityState(salt, derived);
       this.salt = salt;
       this.hash = derived;
       this.config.set('lock.enabled', true);
@@ -88,13 +97,13 @@ class LockManager {
       let rollbackErr = null;
       if (prevSalt && prevHash) {
         try {
-          saveSecurityState(prevSalt, prevHash);
+          storage.saveSecurityState(prevSalt, prevHash);
         } catch (rErr) {
           rollbackErr = rErr;
         }
       } else {
         try {
-          removeSecurityFile();
+          storage.removeSecurityFile();
         } catch (rErr) {
           rollbackErr = rErr;
         }
@@ -123,28 +132,40 @@ class LockManager {
     const prevHash = this.hash;
     const prevEnabled = this.config.get('lock.enabled');
 
+    // 1. Unlink credentials file from disk FIRST.
+    // If unlinking fails, credentials remain intact on disk, abort immediately.
     try {
-      // 1. Commit config to disk FIRST before unlinking credentials
-      this.config.set('lock.enabled', false);
-      this.config.save({ throwOnError: true });
-
-      // 2. Only unlink credentials file after config is safely saved
-      removeSecurityFile();
-      this.salt = null;
-      this.hash = null;
-      this.isLocked = false;
-      return true;
+      storage.removeSecurityFile();
     } catch (err) {
-      // If config save failed, security.json was never deleted.
-      // If removeSecurityFile failed after config save, restore config.
+      throw new Error(`Failed to remove credentials file: ${err.message}`);
+    }
+
+    // 2. Commit config to disk to reflect disabled lock state
+    this.config.set('lock.enabled', false);
+    try {
+      this.config.save({ throwOnError: true });
+    } catch (cfgErr) {
+      // Config save failed: restore security credentials to avoid leaving
+      // an inconsistent or unmanaged state.
+      let restoreErr = null;
+      try {
+        storage.saveSecurityState(prevSalt, prevHash);
+      } catch (rErr) {
+        restoreErr = rErr;
+      }
       this.salt = prevSalt;
       this.hash = prevHash;
       this.config.set('lock.enabled', prevEnabled);
-      try {
-        this.config.save();
-      } catch (_) {}
-      throw new Error(`Failed to persist lock removal: ${err.message}`);
+      if (restoreErr) {
+        throw new Error(`Failed to persist lock configuration (${cfgErr.message}) and failed to restore credentials file: ${restoreErr.message}`);
+      }
+      throw new Error(`Failed to persist lock configuration: ${cfgErr.message}`);
     }
+
+    this.salt = null;
+    this.hash = null;
+    this.isLocked = false;
+    return true;
   }
 
   verify(pin) {
@@ -200,5 +221,5 @@ class LockManager {
 
 module.exports = {
   LockManager,
-  SECURITY_PATH,
+  SECURITY_PATH: storage.SECURITY_PATH,
 };

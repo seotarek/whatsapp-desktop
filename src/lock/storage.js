@@ -43,10 +43,24 @@ function saveSecurityState(salt, hash) {
 
   const tempPath = `${SECURITY_PATH}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    const fd = fs.openSync(tempPath, 'w', 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify(data, null, 2), 0, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.chmodSync(tempPath, 0o600);
     fs.renameSync(tempPath, SECURITY_PATH);
     fs.chmodSync(SECURITY_PATH, 0o600);
+    try {
+      const dirFd = fs.openSync(CONFIG_DIR, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch (_) {}
   } catch (err) {
     try {
       if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
